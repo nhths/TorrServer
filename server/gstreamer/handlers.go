@@ -81,6 +81,13 @@ func (s *Service) master(c *gin.Context) {
 	fileID := firstNonEmpty(c.Query("index"), c.Query("id"), c.Query("fileID"))
 	audio := parseQueryInt(c, "audio", 0)
 
+	if !torrentReadyForGStreamer(hash) {
+		gstSourceFailure(hash, fileID, audio, "master task creation", ErrMetadataPending)
+		c.Header("Retry-After", "2")
+		c.String(http.StatusServiceUnavailable, ErrMetadataPending.Error())
+		return
+	}
+
 	task, err := s.GetOrAdd(hash, fileID, audio)
 	if err != nil {
 		gstSourceFailure(hash, fileID, audio, "master task creation", err)

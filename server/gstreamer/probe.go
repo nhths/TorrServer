@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,9 +15,27 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"server/torr"
 )
 
-const gstProbeTimeout = 30 * time.Second
+const (
+	// gstProbeAttemptTimeout is the per-attempt timeout for a single
+	// gst-discoverer run. Kept small so that, when torrent metadata has
+	// not been downloaded yet, we fail fast and switch to a metadata
+	// wait loop instead of holding the HTTP request for the full
+	// previous 30-second window.
+	gstProbeAttemptTimeout = 5 * time.Second
+
+	// gstProbeMetadataWait is the total wall-clock budget the probe
+	// endpoint will spend waiting for torrent metadata to arrive
+	// (BT handshake / DHT / tracker scrape) before giving up.
+	gstProbeMetadataWait = 45 * time.Second
+
+	// gstProbeRetryInterval is the pause between metadata-ready checks
+	// and between subsequent gst-discoverer attempts.
+	gstProbeRetryInterval = 750 * time.Millisecond
+)
 
 var (
 	discovererDurationRe  = regexp.MustCompile(`(?i)Duration:\s*(\d+):(\d+):(\d+)(?:\.(\d+))?`)
@@ -160,7 +179,40 @@ func (p ProbeInfo) IsVP9() bool  { return p.VideoCapsName() == "video/x-vp9" }
 func (p ProbeInfo) IsVP8() bool  { return p.VideoCapsName() == "video/x-vp8" }
 
 func probeSource(sourceURL string, conf Config) (ProbeInfo, error) {
-	output, err := runGSTDiscoverer(sourceURL, conf, gstProbeTimeout)
+	hash := torrentHashFromSource(sourceURL)
+
+	deadline := time.Now().Add(gstProbeMetadataWait)
+	for {
+		if time.Now().After(deadline) {
+			break
+		}
+
+		// Errors are deliberately ignored here: a failure at this
+		// stage almost always means "metadata not there yet", and
+		// the authoritative attempt with error reporting runs after
+		// the loop.
+		output, _ := runGSTDiscoverer(sourceURL, conf, gstProbeAttemptTimeout)
+		if strings.TrimSpace(output) != "" {
+			probe := probeFromDiscoverer(output)
+			if len(probe.Tracks) > 0 {
+				return probe, nil
+			}
+		}
+
+		// No tracks / empty output: gst-discoverer could not read the
+		// file. If the torrent is registered but metadata has not been
+		// fetched yet (BT handshake, tracker scrape, DHT bootstrap),
+		// wait for GotInfo before trying again instead of failing the
+		// request outright.
+		if !waitForTorrentMetadata(hash, deadline) {
+			break
+		}
+
+		// Metadata is ready now — probe again. If it still fails, fall
+		// through and return the last error.
+	}
+
+	output, err := runGSTDiscoverer(sourceURL, conf, gstProbeAttemptTimeout)
 	if strings.TrimSpace(output) == "" {
 		if err != nil {
 			return ProbeInfo{}, err
@@ -176,6 +228,76 @@ func probeSource(sourceURL string, conf Config) (ProbeInfo, error) {
 		return ProbeInfo{}, errors.New("gst-discoverer returned no stream info")
 	}
 	return probe, nil
+}
+
+// torrentHashFromSource extracts the torrent hash from a gstreamer source
+// URL produced by streamURL/playURL. Both flavours encode the hash in the
+// `link` (stream) or path (play) component.
+func torrentHashFromSource(sourceURL string) string {
+	parsed, err := url.Parse(sourceURL)
+	if err != nil {
+		return ""
+	}
+
+	values := parsed.Query()
+	if hash := values.Get("link"); hash != "" {
+		return hash
+	}
+
+	// play/{hash}/{file} — hash is the first path segment after /play/
+	parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	if len(parts) >= 2 && parts[0] == "play" {
+		return parts[1]
+	}
+	return ""
+}
+
+// waitForTorrentMetadata blocks until the registered torrent has
+// received its info dict (BT handshake, tracker scrape, DHT), or until
+// the probe deadline is reached. Returns true if metadata became
+// available, false if the wait timed out, the torrent was never
+// registered, or the service is being torn down.
+func waitForTorrentMetadata(hash string, deadline time.Time) bool {
+	if hash == "" {
+		return false
+	}
+
+	tor := torr.GetTorrent(hash)
+	if tor == nil || tor.Torrent == nil {
+		// Torrent not yet registered — short poll loop so we notice
+		// once it appears.
+		return waitUntil(deadline, func() bool {
+			return torr.GetTorrent(hash) != nil
+		})
+	}
+
+	if tor.GotInfo() {
+		return true
+	}
+
+	gotInfo := tor.Torrent.GotInfo()
+	return waitUntil(deadline, func() bool {
+		select {
+		case <-gotInfo:
+			return true
+		default:
+			return tor.GotInfo()
+		}
+	})
+}
+
+// waitUntil polls condition every gstProbeRetryInterval until it
+// returns true or the deadline elapses.
+func waitUntil(deadline time.Time, condition func() bool) bool {
+	for {
+		if condition() {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(gstProbeRetryInterval)
+	}
 }
 
 func runGSTDiscoverer(sourceURL string, conf Config, timeout time.Duration) (string, error) {

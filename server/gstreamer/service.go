@@ -34,6 +34,7 @@ var (
 	ErrEndOfStreamExhausted    = errors.New("gstreamer end of stream is exhausted")
 	ErrTruncatedMP4Fragment    = errors.New("truncated mp4 fragment at end of stream")
 	ErrUndecodableEOSRemainder = errors.New("undecodable mp4 eos remainder")
+	ErrMetadataPending         = errors.New("torrent metadata is not ready yet")
 )
 
 type Service struct {
@@ -420,6 +421,22 @@ func getTorrentForGStreamer(hash string) (tor *torr.Torrent) {
 		return nil
 	}
 	return torr.GetTorrent(hash)
+}
+
+// torrentReadyForGStreamer reports whether the HTTP layer may proceed
+// with the normal pipeline. It returns false only when the torrent is
+// registered but its metadata has not been fetched yet (BT handshake /
+// tracker scrape / DHT bootstrap still in progress) — starting a
+// gst-discoverer run in that state will inevitably fail, so the HTTP
+// layer short-circuits with 503 + Retry-After instead. Unknown
+// torrents return true so the pipeline produces its own error (and
+// unit tests without a BT client keep working).
+func torrentReadyForGStreamer(hash string) bool {
+	tor := getTorrentForGStreamer(hash)
+	if tor == nil {
+		return true
+	}
+	return tor.GotInfo()
 }
 
 func torrentStatusFileSize(status *torrstate.TorrentStatus, index int) int64 {
