@@ -35,27 +35,27 @@ func (s *Service) remove(c *gin.Context) {
 		return
 	}
 
-	if s.TryRemove(id) {
-		dropTorrentForGStreamer(id)
-		c.JSON(http.StatusOK, gin.H{"success": true})
-		return
-	}
-
-	// Hash with caps-aware task keys: TryRemove("hash") failed because
-	// tasks live under "hash|digest". Drop every caps variant and the
-	// torrent so the client can switch caps freely without leaks.
-	removed := s.removeCapsVariants(id)
-	if !removed {
+	// Caps-aware tasks live under id|digest. The client only knows
+	// the original hash, so the request may target any combination
+	// of {legacy task, caps variants}. Drop them all in one shot and
+	// drop the underlying torrent regardless of what matched.
+	legacyRemoved := s.TryRemove(id)
+	variantsRemoved := s.removeCapsVariants(id)
+	if !legacyRemoved && !variantsRemoved {
 		c.Status(http.StatusNotFound)
 		return
 	}
+
 	dropTorrentForGStreamer(id)
 	c.JSON(http.StatusOK, gin.H{"success": true})
 }
 
 func (s *Service) heartbeat(c *gin.Context) {
 	hash := c.Param("hash")
-	if s.lookup(c) == nil {
+	// heartbeat is called without caps: find any live task for this
+	// hash so caps-aware torrents are kept warm regardless of which
+	// caps variant is currently active.
+	if s.findAnyByHash(hash) == nil {
 		c.Status(http.StatusNotFound)
 		return
 	}
@@ -230,8 +230,23 @@ func buildVariantPlaylist(task *Task, audio int, seconds int) string {
 
 func (t *Task) hlsBandwidth() (int64, int64) {
 	audio := int64(max(t.Config.AACBitrateKbps, 1) * 1000)
-	if track := t.Probe.AudioTrack(t.Audio); effectiveAACChannels(t.Config, track) > 2 {
-		audio *= 2
+	if track := t.Probe.AudioTrack(t.Audio); track != nil {
+		if AudioPassThrough(track, t.Config.AudioCaps) {
+			switch audioFamily(track) {
+			case AudioFamilyAC3, AudioFamilyEAC3:
+				// ~640 kbps ceiling for passthrough; AAC estimate
+				// would under-report variant peak significantly.
+				if audio < 640_000 {
+					audio = 640_000
+				}
+			case AudioFamilyOpus:
+				if audio < 256_000 {
+					audio = 256_000
+				}
+			}
+		} else if effectiveAACChannels(t.Config, track) > 2 {
+			audio *= 2
+		}
 	}
 	if videoIsTranscoded(t.Config, t.Probe) {
 		average := int64(max(t.Config.VideoBitrate, 1)*1000) + audio
@@ -268,8 +283,8 @@ func (t *Task) hlsCodecs() string {
 	}
 	audioCodec := "mp4a.40.2"
 	if track := t.Probe.AudioTrack(t.Audio); track != nil {
-		if AudioPassThrough(track.Codec, t.Config.AudioCaps) {
-			audioCodec = audioCodecForPassthrough(track.Codec)
+		if AudioPassThrough(track, t.Config.AudioCaps) {
+			audioCodec = audioCodecForFamily(audioFamily(track))
 		}
 	}
 	if t.Probe.HasAudio() {
@@ -278,20 +293,19 @@ func (t *Task) hlsCodecs() string {
 	return videoCodec
 }
 
-// audioCodecForPassthrough returns the RFC 6381 codec string for raw
-// audio streams we let through without transcoding. Falls back to AAC
-// for unknown codecs to avoid breaking clients that can't parse it.
-func audioCodecForPassthrough(codec string) string {
-	codec = strings.ToLower(codec)
-	switch {
-	case strings.Contains(codec, "ac3") && !strings.Contains(codec, "eac3"):
+// audioCodecForFamily returns the RFC 6381 codec string for raw audio
+// streams we let through without transcoding. Falls back to AAC for
+// the (unreachable) unknown family to keep the playlist parseable.
+func audioCodecForFamily(family string) string {
+	switch family {
+	case AudioFamilyAC3:
 		return "ac-3"
-	case strings.Contains(codec, "eac3"):
+	case AudioFamilyEAC3:
 		return "ec-3"
-	case strings.Contains(codec, "opus"):
-		return "opus"
-	case strings.Contains(codec, "mp3") || strings.Contains(codec, "mpegversion=1"):
-		return "mp4a.40.34" // MP3-in-MP4 RFC 4337
+	case AudioFamilyOpus:
+		return "Opus" // RFC 6381 canonical spelling is mixed case
+	case AudioFamilyMP3:
+		return "mp4a.40.34" // MP3-in-MP4 per RFC 4337
 	}
 	return "mp4a.40.2"
 }

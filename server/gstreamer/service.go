@@ -99,12 +99,17 @@ func (s *Service) GetOrAdd(hash string, fileID string, audio int, videoCaps []Vi
 	}
 
 	id := taskKey(hash, videoCaps, audioCaps)
+	// Singleflight key adds fileID/audio: callers selecting different
+	// files or audio tracks from the same torrent must not share the
+	// same in-flight task creation closure (they describe different
+	// pipelines).
+	sfKey := id + "\x00" + fileID + "\x00" + strconv.Itoa(audio)
 
 	for {
 		if s.disposed.Load() {
 			return nil, ErrServiceClosed
 		}
-		value, err, _ := s.taskCalls.Do(id, func() (any, error) {
+		value, err, _ := s.taskCalls.Do(sfKey, func() (any, error) {
 			return s.getOrAdd(hash, fileID, audio, videoCaps, audioCaps, id)
 		})
 		if err != nil {
@@ -585,6 +590,31 @@ func (s *Service) detachTask(id string, expected *Task) (*Task, bool) {
 	delete(s.tasks, id)
 	s.mu.Unlock()
 	return task, true
+}
+
+// findAnyByHash returns the first task whose ID equals hash or
+// starts with hash+"|". Used by endpoints that the client calls with
+// the bare torrent hash (no caps): heartbeat. Returning any live
+// variant is enough to keep the torrent considered active.
+func (s *Service) findAnyByHash(hash string) *Task {
+	if hash == "" {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if task := s.tasks[hash]; task != nil && !task.IsDisposed() {
+		return task
+	}
+	prefix := hash + "|"
+	for id, task := range s.tasks {
+		if !strings.HasPrefix(id, prefix) {
+			continue
+		}
+		if task != nil && !task.IsDisposed() {
+			return task
+		}
+	}
+	return nil
 }
 
 // removeCapsVariants removes every task whose ID starts with hash+"|".
