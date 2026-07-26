@@ -1,6 +1,7 @@
 package torr
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -86,7 +87,14 @@ func SaveTorrentToDB(torr *Torrent) {
 }
 
 func GetTorrent(hashHex string) *Torrent {
-	hash := metainfo.NewHashFromHex(hashHex)
+	// NewHashFromHex panics on anything other than a 40-char lower-
+	// case hex string. Several callers (gstreamer probe, web UI
+	// search box) hand in arbitrary user input; convert the panic
+	// into "not found" instead of crashing the whole process.
+	hash, err := safeHashFromHex(hashHex)
+	if err != nil {
+		return nil
+	}
 	timeout := time.Second * time.Duration(sets.BTsets.TorrentDisconnectTimeout)
 	if timeout > time.Minute {
 		timeout = time.Minute
@@ -300,3 +308,20 @@ func Preload(torr *Torrent, index int) {
 	}
 	torr.Preload(index, size)
 }
+
+
+// safeHashFromHex wraps metainfo.NewHashFromHex with panic recovery
+// and a length check. Returns an error for any input the upstream
+// helper would reject (non-hex, wrong length, mixed case, empty).
+// Callers that need a *Torrent use the error to map to "not found".
+func safeHashFromHex(s string) (hash metainfo.Hash, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("invalid infohash: %v", r)
+		}
+	}()
+	if len(s) != 40 {
+		return hash, fmt.Errorf("invalid infohash length %d", len(s))
+	}
+	return metainfo.NewHashFromHex(s), nil
+} 

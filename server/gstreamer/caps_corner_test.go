@@ -288,6 +288,88 @@ func TestProperty_DigestStableUnderDuplication(t *testing.T) {
 	}
 }
 
+// --- Dispose race regression -----------------------------------------
+
+func TestAcquireReleaseDisposeRace(t *testing.T) {
+	// Pattern: a handler has Acquire'd a task; removeCapsVariants
+	// marks it; the handler finishes and Release runs; Dispose fires.
+	// Assert: task.IsDisposed() at the end, no double-dispose, no
+	// nil-task panic in the handler.
+	conf := Config{}.normalized()
+	task, _ := newTrackedTask("h|v:h264:hw,a:aac,", time.Now().UTC())
+	task.Config = conf
+
+	s := &Service{
+		conf:        conf,
+		tasks:       map[string]*Task{task.ID: task},
+		probeCache:  make(map[string]probeCacheEntry),
+		stopCleanup: make(chan struct{}),
+	}
+
+	if s.Acquire(task.ID) == nil {
+		t.Fatal("first Acquire must succeed")
+	}
+	if s.Acquire(task.ID) == nil {
+		t.Fatal("second concurrent Acquire must also succeed (refs=2)")
+	}
+
+	if !s.removeCapsVariants("h") {
+		t.Fatal("removeCapsVariants should claim the task")
+	}
+	if _, ok := s.tasks[task.ID]; ok {
+		t.Errorf("task should be detached from map after remove")
+	}
+	if task.refsLoad() != 2 {
+		t.Errorf("expected refs=2, got %d", task.refsLoad())
+	}
+	if task.IsDisposed() {
+		t.Errorf("task should not be disposed while refs>0")
+	}
+
+	// Simulate two handlers finishing concurrently.
+	s.Release(task)
+	s.Release(task)
+
+	// Give the disposeWhenQuiescent watcher a chance to run.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if task.IsDisposed() {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !task.IsDisposed() {
+		t.Fatalf("task should be disposed after refs reached 0; refs=%d", task.refsLoad())
+	}
+
+	// Further Acquire on a disposed task must fail.
+	if s.Acquire(task.ID) != nil {
+		t.Error("Acquire on disposed task must return nil")
+	}
+	s.Dispose()
+}
+
+func TestTryRemove_MarksThenDisposesImmediatelyWhenQuiescent(t *testing.T) {
+	conf := Config{}.normalized()
+	task, _ := newTrackedTask("h", time.Now().UTC())
+	task.Config = conf
+
+	s := &Service{
+		conf:        conf,
+		tasks:       map[string]*Task{task.ID: task},
+		probeCache:  make(map[string]probeCacheEntry),
+		stopCleanup: make(chan struct{}),
+	}
+
+	if !s.TryRemove("h") {
+		t.Fatal("TryRemove should succeed")
+	}
+	if !task.IsDisposed() {
+		t.Error("TryRemove on quiescent task should dispose immediately")
+	}
+	s.Dispose()
+}
+
 // --- Helpers --------------------------------------------------------
 
 func permuteVideoCaps(in []VideoCap, seed int) []VideoCap {

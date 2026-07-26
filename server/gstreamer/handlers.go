@@ -104,6 +104,7 @@ func (s *Service) master(c *gin.Context) {
 		abortWithSourceError(c, err)
 		return
 	}
+	defer s.Release(task)
 
 	seconds := parseQueryInt(c, "seconds", 0)
 	if err := task.EnsureInit(c.Request.Context(), audio, task.startIndexForSeconds(seconds)); err != nil {
@@ -123,6 +124,7 @@ func (s *Service) videoPlaylist(c *gin.Context) {
 		c.Status(http.StatusNotFound)
 		return
 	}
+	defer s.Release(task)
 	audio := parseQueryInt(c, "audio", task.Audio)
 	startIndex := task.startIndexForSeconds(parseQueryInt(c, "seconds", 0))
 	c.Data(http.StatusOK, "application/vnd.apple.mpegurl; charset=utf-8", []byte(buildTaskPlaylist(task, startIndex, audio)))
@@ -379,6 +381,7 @@ func (s *Service) initMP4(c *gin.Context) {
 		c.Status(http.StatusNotFound)
 		return
 	}
+	defer s.Release(task)
 
 	audio := parseQueryInt(c, "audio", task.Audio)
 	startIndex := task.startIndexForSeconds(parseQueryInt(c, "seconds", 0))
@@ -410,6 +413,7 @@ func (s *Service) segment(c *gin.Context) {
 		c.Status(http.StatusNotFound)
 		return
 	}
+	defer s.Release(task)
 
 	index, err := parseSegmentIndex(c.Param("segment"))
 	if err != nil {
@@ -446,6 +450,7 @@ func (s *Service) subtitle(c *gin.Context) {
 		c.Status(http.StatusNotFound)
 		return
 	}
+	defer s.Release(task)
 	path := strings.TrimPrefix(c.Param("subtitle"), "/")
 	if strings.HasSuffix(path, ".m3u8") && !strings.Contains(strings.TrimSuffix(path, ".m3u8"), "/") {
 		trackIndex, err := strconv.Atoi(strings.TrimSuffix(path, ".m3u8"))

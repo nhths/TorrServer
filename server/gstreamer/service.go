@@ -120,6 +120,14 @@ func (s *Service) GetOrAdd(hash string, fileID string, audio int, videoCaps []Vi
 			return nil, errors.New("gstreamer task creation returned an invalid result")
 		}
 		if taskMatchesRequest(task, hash, fileID, audio, videoCaps, audioCaps) {
+			// Bump the refcount on the returned task so the caller
+			// can pair it with Release. The task may have just been
+			// created (refs==0) or may already be held by another
+			// caller — Acquire handles both cases and refuses
+			// marked-for-removal tasks.
+			if !task.Acquire() {
+				return nil, ErrTaskNotFound
+			}
 			return task, nil
 		}
 	}
@@ -550,19 +558,48 @@ func cloneProbeInfo(probe ProbeInfo) ProbeInfo {
 }
 
 func (s *Service) Get(id string) *Task {
+	return s.Acquire(id)
+}
+
+// Acquire is the refcounted lookup. The caller MUST eventually call
+// Release(task) — preferably via defer. A successful Acquire returns
+// nil if the task is missing, disposed, or marked for removal; in
+// that case no Release is needed.
+func (s *Service) Acquire(id string) *Task {
 	if id == "" || s.disposed.Load() {
 		return nil
 	}
 
 	s.mu.RLock()
 	task := s.tasks[id]
-	if task == nil || task.IsDisposed() {
-		s.mu.RUnlock()
+	s.mu.RUnlock()
+	if task == nil || !task.Acquire() {
+		return nil
+	}
+	if task.IsDisposed() {
+		task.refs.Add(-1)
 		return nil
 	}
 	task.UpdateLastActive()
-	s.mu.RUnlock()
 	return task
+}
+
+// Release drops a refcount acquired by Acquire. If the task was
+// already marked for removal and refs hits zero, Dispose runs.
+func (s *Service) Release(task *Task) {
+	if task == nil {
+		return
+	}
+	if task.refs.Add(-1) == 0 && task.markForRemovalWasSet() {
+		task.Dispose()
+	}
+}
+
+// markForRemovalWasSet reports whether markForRemoval already fired
+// (cheap non-mutating helper used by Release to avoid disposing
+// tasks that are simply being garbage-collected).
+func (t *Task) markForRemovalWasSet() bool {
+	return t.markRemoved.Load()
 }
 
 func (s *Service) TryRemove(id string) bool {
@@ -571,7 +608,15 @@ func (s *Service) TryRemove(id string) bool {
 		return false
 	}
 
-	task.Dispose()
+	// Mark first so any new Acquire fails, then dispose if no
+	// in-flight handlers hold a ref.
+	if !task.markForRemoval() {
+		// Already marked by another caller; this caller is a no-op.
+		return true
+	}
+	if task.refsLoad() == 0 {
+		task.Dispose()
+	}
 	return true
 }
 
@@ -627,23 +672,68 @@ func (s *Service) removeCapsVariants(hash string) bool {
 	prefix := hash + "|"
 
 	s.mu.Lock()
-	var removed []*Task
+	var marked []*Task
 	for id, task := range s.tasks {
 		if !strings.HasPrefix(id, prefix) {
 			continue
 		}
 		delete(s.tasks, id)
-		if task != nil {
-			removed = append(removed, task)
+		if task != nil && task.markForRemoval() {
+			marked = append(marked, task)
 		}
 	}
 	s.mu.Unlock()
 
-	if len(removed) == 0 {
+	if len(marked) == 0 {
 		return false
 	}
-	disposeTasks(removed)
+	disposeWhenQuiescent(marked)
 	return true
+}
+
+// disposeWhenQuiescent disposes each task as soon as its refcount
+// drops to zero. Tasks currently in flight (Acquire'd by a handler
+// mid-request) finish cleanly; tasks with refs==0 are disposed
+// immediately. The watcher polls at 50ms and bails out if a task
+// is disposed externally (caller abandoned it) so we don't leak
+// goroutines on hung handlers.
+func disposeWhenQuiescent(tasks []*Task) {
+	var live []*Task
+	for _, task := range tasks {
+		if task == nil {
+			continue
+		}
+		if task.refsLoad() == 0 {
+			task.Dispose()
+		} else {
+			live = append(live, task)
+		}
+	}
+	if len(live) == 0 {
+		return
+	}
+	go func() {
+		for {
+			stillLive := live[:0]
+			for _, task := range live {
+				if task.refsLoad() == 0 {
+					task.Dispose()
+					continue
+				}
+				if task.disposed.Load() {
+					// Externally disposed (e.g. service Dispose) —
+					// don't wait.
+					continue
+				}
+				stillLive = append(stillLive, task)
+			}
+			if len(stillLive) == 0 {
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+			live = stillLive
+		}
+	}()
 }
 
 func (s *Service) tryRemoveExpectedInactive(id string, expected *Task, cutoff time.Time) bool {
@@ -681,9 +771,16 @@ func (s *Service) Dispose() {
 	s.probeCache = make(map[string]probeCacheEntry)
 	s.probeMu.Unlock()
 
+	// Mark every task for removal (new Acquire's fail) and dispose
+	// once refs drop to zero. disposeWhenQuiescent handles both
+	// immediate (refs==0) and in-flight (refs>0) cases.
+	var marked []*Task
 	for _, task := range tasks {
-		task.Dispose()
+		if task != nil && task.markForRemoval() {
+			marked = append(marked, task)
+		}
 	}
+	disposeWhenQuiescent(marked)
 }
 
 func (s *Service) cleanupLoop() {

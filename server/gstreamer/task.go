@@ -45,7 +45,51 @@ type Task struct {
 	subtitleMu     sync.RWMutex
 	subtitleStores map[int]*subtitleStore
 
+	// refs counts in-flight handlers that have acquired the task
+	// via Service.Acquire. The lifecycle is:
+	//   Service.Acquire -> refs++
+	//   handler returns -> Service.Release(task) -> refs--
+	//   TryRemove / removeCapsVariants / Dispose -> markRemoved=true;
+	//     actual Dispose() runs only when refs drops to 0.
+	// Marked-for-removal tasks are detached from the map immediately
+	// so no new handler can acquire them, but in-flight ones still
+	// see a valid task and finish cleanly.
+	refs        atomic.Int32
+	markRemoved atomic.Bool
+
 	disposed atomic.Bool
+}
+
+// Acquire increments the refcount and returns true if the task is
+// usable (not disposed and not marked for removal). Callers MUST
+// pair every successful Acquire with Service.Release(task).
+func (t *Task) Acquire() bool {
+	if t == nil {
+		return false
+	}
+	if t.markRemoved.Load() || t.disposed.Load() {
+		return false
+	}
+	t.refs.Add(1)
+	// Re-check after the increment: a concurrent Dispose that ran
+	// between the Load and the Add would have observed refs==0 and
+	// disposed; we must roll back if so.
+	if t.markRemoved.Load() || t.disposed.Load() {
+		t.refs.Add(-1)
+		return false
+	}
+	return true
+}
+
+// refsLoad returns the current refcount (for tests / observability).
+func (t *Task) refsLoad() int32 { return t.refs.Load() }
+
+// markForRemoval atomically detaches the task from external use.
+// Returns true if this caller wins the race to mark (and therefore
+// is responsible for the eventual Dispose), false if another caller
+// already marked it.
+func (t *Task) markForRemoval() bool {
+	return !t.markRemoved.Swap(true)
 }
 
 func NewTask(id string, fileID string, audio int, sourceURL string, probe ProbeInfo, cue *CueTimeline, conf Config) (*Task, error) {
