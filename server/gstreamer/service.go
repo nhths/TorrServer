@@ -93,17 +93,19 @@ func NewService(conf Config) *Service {
 	return service
 }
 
-func (s *Service) GetOrAdd(hash string, fileID string, audio int) (*Task, error) {
+func (s *Service) GetOrAdd(hash string, fileID string, audio int, videoCaps []VideoCap, audioCaps []string) (*Task, error) {
 	if hash == "" || fileID == "" {
 		return nil, ErrBadSource
 	}
+
+	id := taskKey(hash, videoCaps, audioCaps)
 
 	for {
 		if s.disposed.Load() {
 			return nil, ErrServiceClosed
 		}
-		value, err, _ := s.taskCalls.Do(hash, func() (any, error) {
-			return s.getOrAdd(hash, fileID, audio)
+		value, err, _ := s.taskCalls.Do(id, func() (any, error) {
+			return s.getOrAdd(hash, fileID, audio, videoCaps, audioCaps, id)
 		})
 		if err != nil {
 			return nil, err
@@ -112,19 +114,24 @@ func (s *Service) GetOrAdd(hash string, fileID string, audio int) (*Task, error)
 		if !ok {
 			return nil, errors.New("gstreamer task creation returned an invalid result")
 		}
-		if taskMatchesRequest(task, hash, fileID, audio) {
+		if taskMatchesRequest(task, hash, fileID, audio, videoCaps, audioCaps) {
 			return task, nil
 		}
 	}
 }
 
-func (s *Service) getOrAdd(hash string, fileID string, audio int) (*Task, error) {
+func (s *Service) getOrAdd(hash string, fileID string, audio int, videoCaps []VideoCap, audioCaps []string, id string) (*Task, error) {
 	if s.disposed.Load() {
 		return nil, ErrServiceClosed
 	}
 	conf := s.currentConfig()
+	// Per-request config override: pipeline uses the request's caps,
+	// not the global ones (which don't carry caps).
+	if len(videoCaps) > 0 || len(audioCaps) > 0 {
+		conf.VideoCaps = append([]VideoCap(nil), videoCaps...)
+		conf.AudioCaps = append([]string(nil), audioCaps...)
+	}
 	sourceURL := sourceURL(conf, hash, fileID)
-	id := hash
 
 	s.mu.RLock()
 	task := s.tasks[id]
@@ -183,8 +190,25 @@ func (s *Service) getOrAdd(hash string, fileID string, audio int) (*Task, error)
 	return task, nil
 }
 
-func taskMatchesRequest(task *Task, hash string, fileID string, audio int) bool {
-	return task != nil && !task.IsDisposed() && task.ID == hash && task.FileID == fileID && task.Audio == audio
+func taskMatchesRequest(task *Task, hash string, fileID string, audio int, videoCaps []VideoCap, audioCaps []string) bool {
+	if task == nil || task.IsDisposed() {
+		return false
+	}
+	if task.ID != taskKey(hash, videoCaps, audioCaps) {
+		return false
+	}
+	return task.FileID == fileID && task.Audio == audio
+}
+
+// taskKey is the per-task identifier in s.tasks. Legacy clients (no
+// v/a) get hash-only keys; clients sending caps get a hash|digest key
+// so different caps run on independent pipelines.
+func taskKey(hash string, videoCaps []VideoCap, audioCaps []string) string {
+	digest := CapsDigest(videoCaps, audioCaps)
+	if digest == "" {
+		return hash
+	}
+	return hash + "|" + digest
 }
 
 func shouldUseCueTimeline(conf Config, probe ProbeInfo) bool {
@@ -561,6 +585,35 @@ func (s *Service) detachTask(id string, expected *Task) (*Task, bool) {
 	delete(s.tasks, id)
 	s.mu.Unlock()
 	return task, true
+}
+
+// removeCapsVariants removes every task whose ID starts with hash+"|".
+// Used by /gst/remove when the legacy hash-only lookup misses — the
+// actual tasks live under hash|digest per caps.
+func (s *Service) removeCapsVariants(hash string) bool {
+	if hash == "" {
+		return false
+	}
+	prefix := hash + "|"
+
+	s.mu.Lock()
+	var removed []*Task
+	for id, task := range s.tasks {
+		if !strings.HasPrefix(id, prefix) {
+			continue
+		}
+		delete(s.tasks, id)
+		if task != nil {
+			removed = append(removed, task)
+		}
+	}
+	s.mu.Unlock()
+
+	if len(removed) == 0 {
+		return false
+	}
+	disposeTasks(removed)
+	return true
 }
 
 func (s *Service) tryRemoveExpectedInactive(id string, expected *Task, cutoff time.Time) bool {

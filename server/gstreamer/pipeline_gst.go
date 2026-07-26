@@ -484,6 +484,9 @@ func (r *gstRunner) createPipelineArgs() string {
 		sb.WriteString(" ! mq.sink_1 mq.src_1 ! ")
 		if audioTrack.IsAACAudio() {
 			sb.WriteString("aacparse ! audio/mpeg,mpegversion=4,stream-format=raw ! mux.audio_0 ")
+		} else if AudioPassThrough(audioTrack.Codec, conf.AudioCaps) {
+			sb.WriteString(r.audioPassthroughCaps(audioTrack.Codec))
+			sb.WriteString(" ! mux.audio_0 ")
 		} else {
 			aacChannels := effectiveAACChannels(conf, audioTrack)
 			aacSampleRate := effectiveAACSampleRate(conf, audioTrack)
@@ -581,6 +584,32 @@ func effectiveGStreamerVersion(conf Config) gstVersionInfo {
 
 func (r *gstRunner) aacEncoder() string {
 	return "avenc_aac"
+}
+
+// audioPassthroughCaps returns "parser ! audio/... caps" for codecs
+// the client declared in &a= (skipping AAC transcoding). mp4mux
+// natively wraps ac3/eac3/opus/mp3; we just need the matching parser
+// + caps to negotiate the mux pad.
+//
+// Gst-discoverer codec strings are short lowercased names. We match
+// on substring so e.g. "audio/x-ac3" via probe still hits the ac3
+// branch.
+func (r *gstRunner) audioPassthroughCaps(codec string) string {
+	codec = strings.ToLower(codec)
+	switch {
+	case strings.Contains(codec, "ac3") && !strings.Contains(codec, "eac3"):
+		return "ac3parse ! audio/x-ac3"
+	case strings.Contains(codec, "eac3"):
+		return "eac3parse ! audio/x-eac3"
+	case strings.Contains(codec, "opus"):
+		return "opusparse ! audio/x-opus"
+	case strings.Contains(codec, "mp3") || strings.Contains(codec, "mpegversion=1"):
+		return "mpegaudioparse ! audio/mpeg,mpegversion=1,layer=3"
+	}
+	// Unknown codec claimed as pass-through — fall back to a passthrough
+	// tag and let mp4mux complain; safer than silently transcoding when
+	// the client said "I can play X".
+	return "identity"
 }
 
 func aacRawFormat() string {

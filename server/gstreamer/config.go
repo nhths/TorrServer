@@ -42,6 +42,13 @@ type Config struct {
 	UseGPU               bool `json:"UseGPU"`
 	X264Ultrafast        bool `json:"X264Ultrafast"`
 	VideoBitrate         int  `json:"VideoBitrate"`
+
+	// VideoCaps / AudioCaps are per-request (NOT stored to disk).
+	// VideoCaps is informational from Lampa's device_caps.js (which
+	// tier can decode which codec). AudioCaps drives passthrough in
+	// pipeline_gst.go: codecs listed here skip AAC transcoding.
+	VideoCaps []VideoCap
+	AudioCaps []string
 }
 
 func DefaultConfig() Config {

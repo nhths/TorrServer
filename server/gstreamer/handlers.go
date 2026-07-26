@@ -35,18 +35,27 @@ func (s *Service) remove(c *gin.Context) {
 		return
 	}
 
-	if !s.TryRemove(id) {
-		c.Status(http.StatusNotFound)
+	if s.TryRemove(id) {
+		dropTorrentForGStreamer(id)
+		c.JSON(http.StatusOK, gin.H{"success": true})
 		return
 	}
 
+	// Hash with caps-aware task keys: TryRemove("hash") failed because
+	// tasks live under "hash|digest". Drop every caps variant and the
+	// torrent so the client can switch caps freely without leaks.
+	removed := s.removeCapsVariants(id)
+	if !removed {
+		c.Status(http.StatusNotFound)
+		return
+	}
 	dropTorrentForGStreamer(id)
 	c.JSON(http.StatusOK, gin.H{"success": true})
 }
 
 func (s *Service) heartbeat(c *gin.Context) {
 	hash := c.Param("hash")
-	if s.Get(hash) == nil {
+	if s.lookup(c) == nil {
 		c.Status(http.StatusNotFound)
 		return
 	}
@@ -80,6 +89,7 @@ func (s *Service) master(c *gin.Context) {
 	hash := c.Param("hash")
 	fileID := firstNonEmpty(c.Query("index"), c.Query("id"), c.Query("fileID"))
 	audio := parseQueryInt(c, "audio", 0)
+	videoCaps, audioCaps := ParseCaps(c.Request.URL.Query())
 
 	if !torrentReadyForGStreamer(hash) {
 		gstSourceFailure(hash, fileID, audio, "master task creation", ErrMetadataPending)
@@ -88,7 +98,7 @@ func (s *Service) master(c *gin.Context) {
 		return
 	}
 
-	task, err := s.GetOrAdd(hash, fileID, audio)
+	task, err := s.GetOrAdd(hash, fileID, audio, videoCaps, audioCaps)
 	if err != nil {
 		gstSourceFailure(hash, fileID, audio, "master task creation", err)
 		abortWithSourceError(c, err)
@@ -108,7 +118,7 @@ func (s *Service) master(c *gin.Context) {
 
 func (s *Service) videoPlaylist(c *gin.Context) {
 	noCache(c)
-	task := s.Get(c.Param("hash"))
+	task := s.lookup(c)
 	if task == nil {
 		c.Status(http.StatusNotFound)
 		return
@@ -256,10 +266,34 @@ func (t *Task) hlsCodecs() string {
 			videoCodec = "vp09.00.10.08"
 		}
 	}
+	audioCodec := "mp4a.40.2"
+	if track := t.Probe.AudioTrack(t.Audio); track != nil {
+		if AudioPassThrough(track.Codec, t.Config.AudioCaps) {
+			audioCodec = audioCodecForPassthrough(track.Codec)
+		}
+	}
 	if t.Probe.HasAudio() {
-		return strings.Trim(videoCodec+",mp4a.40.2", ",")
+		return strings.Trim(videoCodec+","+audioCodec, ",")
 	}
 	return videoCodec
+}
+
+// audioCodecForPassthrough returns the RFC 6381 codec string for raw
+// audio streams we let through without transcoding. Falls back to AAC
+// for unknown codecs to avoid breaking clients that can't parse it.
+func audioCodecForPassthrough(codec string) string {
+	codec = strings.ToLower(codec)
+	switch {
+	case strings.Contains(codec, "ac3") && !strings.Contains(codec, "eac3"):
+		return "ac-3"
+	case strings.Contains(codec, "eac3"):
+		return "ec-3"
+	case strings.Contains(codec, "opus"):
+		return "opus"
+	case strings.Contains(codec, "mp3") || strings.Contains(codec, "mpegversion=1"):
+		return "mp4a.40.34" // MP3-in-MP4 RFC 4337
+	}
+	return "mp4a.40.2"
 }
 
 func hlsQuoted(value string) string {
@@ -326,7 +360,7 @@ func buildTaskPlaylist(task *Task, startIndex int, audio int) string {
 func (s *Service) initMP4(c *gin.Context) {
 	noCache(c)
 
-	task := s.Get(c.Param("hash"))
+	task := s.lookup(c)
 	if task == nil {
 		c.Status(http.StatusNotFound)
 		return
@@ -357,7 +391,7 @@ func (s *Service) initMP4(c *gin.Context) {
 func (s *Service) segment(c *gin.Context) {
 	noCache(c)
 
-	task := s.Get(c.Param("hash"))
+	task := s.lookup(c)
 	if task == nil {
 		c.Status(http.StatusNotFound)
 		return
@@ -393,7 +427,7 @@ func (s *Service) segment(c *gin.Context) {
 
 func (s *Service) subtitle(c *gin.Context) {
 	noCache(c)
-	task := s.Get(c.Param("hash"))
+	task := s.lookup(c)
 	if task == nil {
 		c.Status(http.StatusNotFound)
 		return
@@ -566,6 +600,19 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// lookup resolves a request to a Task by hash + caps. Child endpoints
+// (videoPlaylist/initMP4/segment/subtitle/heartbeat) need to hit the
+// same task that master() created under taskKey(hash, caps), so we
+// parse caps from the same query the parent received.
+func (s *Service) lookup(c *gin.Context) *Task {
+	hash := c.Param("hash")
+	videoCaps, audioCaps := ParseCaps(c.Request.URL.Query())
+	if len(videoCaps) == 0 && len(audioCaps) == 0 {
+		return s.Get(hash)
+	}
+	return s.Get(taskKey(hash, videoCaps, audioCaps))
 }
 
 func startSegmentIndex(seconds int, segmentSeconds int, count int) int {
