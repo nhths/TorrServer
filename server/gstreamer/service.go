@@ -93,12 +93,12 @@ func NewService(conf Config) *Service {
 	return service
 }
 
-func (s *Service) GetOrAdd(hash string, fileID string, audio int, videoCaps []VideoCap, audioCaps []string) (*Task, error) {
+func (s *Service) GetOrAdd(hash string, fileID string, audio int, videoCaps []VideoCap, audioCaps []string, hdrCaps []HDRFeature) (*Task, error) {
 	if hash == "" || fileID == "" {
 		return nil, ErrBadSource
 	}
 
-	id := taskKey(hash, videoCaps, audioCaps)
+	id := taskKey(hash, videoCaps, audioCaps, hdrCaps)
 	// Singleflight key adds fileID/audio: callers selecting different
 	// files or audio tracks from the same torrent must not share the
 	// same in-flight task creation closure (they describe different
@@ -110,7 +110,7 @@ func (s *Service) GetOrAdd(hash string, fileID string, audio int, videoCaps []Vi
 			return nil, ErrServiceClosed
 		}
 		value, err, _ := s.taskCalls.Do(sfKey, func() (any, error) {
-			return s.getOrAdd(hash, fileID, audio, videoCaps, audioCaps, id)
+			return s.getOrAdd(hash, fileID, audio, videoCaps, audioCaps, hdrCaps, id)
 		})
 		if err != nil {
 			return nil, err
@@ -119,7 +119,7 @@ func (s *Service) GetOrAdd(hash string, fileID string, audio int, videoCaps []Vi
 		if !ok {
 			return nil, errors.New("gstreamer task creation returned an invalid result")
 		}
-		if taskMatchesRequest(task, hash, fileID, audio, videoCaps, audioCaps) {
+		if taskMatchesRequest(task, hash, fileID, audio, videoCaps, audioCaps, hdrCaps) {
 			// Bump the refcount on the returned task so the caller
 			// can pair it with Release. The task may have just been
 			// created (refs==0) or may already be held by another
@@ -133,16 +133,17 @@ func (s *Service) GetOrAdd(hash string, fileID string, audio int, videoCaps []Vi
 	}
 }
 
-func (s *Service) getOrAdd(hash string, fileID string, audio int, videoCaps []VideoCap, audioCaps []string, id string) (*Task, error) {
+func (s *Service) getOrAdd(hash string, fileID string, audio int, videoCaps []VideoCap, audioCaps []string, hdrCaps []HDRFeature, id string) (*Task, error) {
 	if s.disposed.Load() {
 		return nil, ErrServiceClosed
 	}
 	conf := s.currentConfig()
 	// Per-request config override: pipeline uses the request's caps,
 	// not the global ones (which don't carry caps).
-	if len(videoCaps) > 0 || len(audioCaps) > 0 {
+	if len(videoCaps) > 0 || len(audioCaps) > 0 || len(hdrCaps) > 0 {
 		conf.VideoCaps = append([]VideoCap(nil), videoCaps...)
 		conf.AudioCaps = append([]string(nil), audioCaps...)
+		conf.HDRCaps = append([]HDRFeature(nil), hdrCaps...)
 	}
 	sourceURL := sourceURL(conf, hash, fileID)
 
@@ -203,21 +204,21 @@ func (s *Service) getOrAdd(hash string, fileID string, audio int, videoCaps []Vi
 	return task, nil
 }
 
-func taskMatchesRequest(task *Task, hash string, fileID string, audio int, videoCaps []VideoCap, audioCaps []string) bool {
+func taskMatchesRequest(task *Task, hash string, fileID string, audio int, videoCaps []VideoCap, audioCaps []string, hdrCaps []HDRFeature) bool {
 	if task == nil || task.IsDisposed() {
 		return false
 	}
-	if task.ID != taskKey(hash, videoCaps, audioCaps) {
+	if task.ID != taskKey(hash, videoCaps, audioCaps, hdrCaps) {
 		return false
 	}
 	return task.FileID == fileID && task.Audio == audio
 }
 
 // taskKey is the per-task identifier in s.tasks. Legacy clients (no
-// v/a) get hash-only keys; clients sending caps get a hash|digest key
-// so different caps run on independent pipelines.
-func taskKey(hash string, videoCaps []VideoCap, audioCaps []string) string {
-	digest := CapsDigest(videoCaps, audioCaps)
+// v/a/h) get hash-only keys; clients sending caps get a hash|digest
+// key so different caps run on independent pipelines.
+func taskKey(hash string, videoCaps []VideoCap, audioCaps []string, hdrCaps []HDRFeature) string {
+	digest := CapsDigest(videoCaps, audioCaps, hdrCaps)
 	if digest == "" {
 		return hash
 	}

@@ -47,9 +47,11 @@ type Config struct {
 	// disk. VideoCaps is informational from Lampa's device_caps.js
 	// (which tier can decode which codec). AudioCaps drives
 	// passthrough in pipeline_gst.go: codecs listed here skip AAC
-	// transcoding.
-	VideoCaps []VideoCap `json:"-"`
-	AudioCaps []string  `json:"-"`
+	// transcoding. HDRCaps drives the HDR tone-mapping decision in
+	// service.go (which features the client supports — pq/hlg/etc.).
+	VideoCaps []VideoCap    `json:"-"`
+	AudioCaps []string      `json:"-"`
+	HDRCaps   []HDRFeature  `json:"-"`
 }
 
 func DefaultConfig() Config {

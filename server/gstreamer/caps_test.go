@@ -108,7 +108,7 @@ func TestParseCaps(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ParseQuery(%q): %v", tc.query, err)
 			}
-			gotVideo, gotAudio := ParseCaps(q)
+			gotVideo, gotAudio, _ := ParseCaps(q)
 			if !reflect.DeepEqual(gotVideo, tc.wantVideo) {
 				t.Errorf("video = %#v, want %#v", gotVideo, tc.wantVideo)
 			}
@@ -120,8 +120,8 @@ func TestParseCaps(t *testing.T) {
 }
 
 func TestCapsDigest_StableForSameSet(t *testing.T) {
-	a := CapsDigest([]VideoCap{{"h265", TierHw}, {"h264", TierSw}}, []string{"aac", "ac3"})
-	b := CapsDigest([]VideoCap{{"h264", TierSw}, {"h265", TierHw}}, []string{"ac3", "aac"})
+	a := CapsDigest([]VideoCap{{"h265", TierHw}, {"h264", TierSw}}, []string{"aac", "ac3"}, nil)
+	b := CapsDigest([]VideoCap{{"h264", TierSw}, {"h265", TierHw}}, []string{"ac3", "aac"}, nil)
 	if a != b {
 		t.Fatalf("digest not stable: %q vs %q", a, b)
 	}
@@ -131,18 +131,18 @@ func TestCapsDigest_StableForSameSet(t *testing.T) {
 }
 
 func TestCapsDigest_StableForDuplicates(t *testing.T) {
-	a := CapsDigest([]VideoCap{{"h264", TierHw}}, []string{"ac3"})
-	b := CapsDigest([]VideoCap{{"h264", TierHw}, {"h264", TierHw}}, []string{"ac3", "ac3"})
+	a := CapsDigest([]VideoCap{{"h264", TierHw}}, []string{"ac3"}, nil)
+	b := CapsDigest([]VideoCap{{"h264", TierHw}, {"h264", TierHw}}, []string{"ac3", "ac3"}, nil)
 	if a != b {
 		t.Fatalf("digest not stable for duplicates: %q vs %q", a, b)
 	}
 }
 
 func TestCapsDigest_EmptyForEmptyCaps(t *testing.T) {
-	if got := CapsDigest(nil, nil); got != "" {
+	if got := CapsDigest(nil, nil, nil); got != "" {
 		t.Fatalf("digest for empty caps = %q, want \"\"", got)
 	}
-	if got := CapsDigest([]VideoCap{}, []string{}); got != "" {
+	if got := CapsDigest([]VideoCap{}, []string{}, nil); got != "" {
 		t.Fatalf("digest for empty caps = %q, want \"\"", got)
 	}
 }
@@ -210,25 +210,25 @@ func TestAudioFamily(t *testing.T) {
 }
 
 func TestTaskKey_LegacyKeepsHash(t *testing.T) {
-	if got := taskKey("hash", nil, nil); got != "hash" {
+	if got := taskKey("hash", nil, nil, nil); got != "hash" {
 		t.Fatalf("taskKey(empty caps) = %q, want \"hash\"", got)
 	}
-	if got := taskKey("hash", []VideoCap{}, []string{}); got != "hash" {
+	if got := taskKey("hash", []VideoCap{}, []string{}, nil); got != "hash" {
 		t.Fatalf("taskKey(no caps) = %q, want \"hash\"", got)
 	}
 }
 
 func TestTaskKey_DistinctForDistinctCaps(t *testing.T) {
-	a := taskKey("h", []VideoCap{{"h264", TierHw}}, []string{"aac"})
-	b := taskKey("h", []VideoCap{{"h264", TierSw}}, []string{"aac"})
+	a := taskKey("h", []VideoCap{{"h264", TierHw}}, []string{"aac"}, nil)
+	b := taskKey("h", []VideoCap{{"h264", TierSw}}, []string{"aac"}, nil)
 	if a == b {
 		t.Fatalf("distinct caps produced same key: %q", a)
 	}
 }
 
 func TestTaskKey_SameForOrderIndependentCaps(t *testing.T) {
-	a := taskKey("h", []VideoCap{{"h265", TierHw}, {"h264", TierSw}}, []string{"aac", "ac3"})
-	b := taskKey("h", []VideoCap{{"h264", TierSw}, {"h265", TierHw}}, []string{"ac3", "aac"})
+	a := taskKey("h", []VideoCap{{"h265", TierHw}, {"h264", TierSw}}, []string{"aac", "ac3"}, nil)
+	b := taskKey("h", []VideoCap{{"h264", TierSw}, {"h265", TierHw}}, []string{"ac3", "aac"}, nil)
 	if a != b {
 		t.Fatalf("order-dependent key: %q vs %q", a, b)
 	}

@@ -48,6 +48,147 @@ func (t Tier) String() string {
 	}
 }
 
+// HDRFeature is one HDR capability the client declared in &hdr=.
+// Multiple flags are independent: a client can advertise
+// {pq, hdr10, 10bit} without hlg, or {hlg, bt2020, 10bit} without
+// pq. The server uses this set to decide between passthrough
+// (every required feature present) and tone-mapping (any required
+// feature missing).
+type HDRFeature uint8
+
+const (
+	HDRNone  HDRFeature = iota // explicit "no HDR support"
+	HDRPQ                       // SMPTE ST 2084 (HDR10 base)
+	HDRHLG                      // Hybrid Log-Gamma
+	HDRHDR10                    // HDR10 static metadata
+	HDRHDR10Plus                // HDR10+ dynamic metadata
+	HDRDV                       // Dolby Vision (any profile)
+	HDRBT2020                   // BT.2020 colour primaries
+	HDR10Bit                    // 10-bit sample depth
+)
+
+// Allowed HDR tokens in the &hdr= query string. Anything else is
+// dropped (no task-key pollution, no unsupported-feature claim).
+var allowedHDRTokens = map[string]HDRFeature{
+	"pq":     HDRPQ,
+	"hlg":    HDRHLG,
+	"hdr10":  HDRHDR10,
+	"hdr10p": HDRHDR10Plus,
+	"dv":     HDRDV,
+	"bt2020": HDRBT2020,
+	"10bit":  HDR10Bit,
+	"none":   HDRNone,
+}
+
+func parseHDRFeature(s string) (HDRFeature, bool) {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "" {
+		return 0, false
+	}
+	hf, ok := allowedHDRTokens[s]
+	return hf, ok
+}
+
+func (h HDRFeature) String() string {
+	switch h {
+	case HDRPQ:
+		return "pq"
+	case HDRHLG:
+		return "hlg"
+	case HDRHDR10:
+		return "hdr10"
+	case HDRHDR10Plus:
+		return "hdr10p"
+	case HDRDV:
+		return "dv"
+	case HDRBT2020:
+		return "bt2020"
+	case HDR10Bit:
+		return "10bit"
+	case HDRNone:
+		return "none"
+	}
+	return ""
+}
+
+func dedupHDR(in []HDRFeature) []HDRFeature {
+	if len(in) == 0 {
+		return in
+	}
+	seen := make(map[HDRFeature]struct{}, len(in))
+	out := in[:0]
+	for _, h := range in {
+		if _, ok := seen[h]; ok {
+			continue
+		}
+		seen[h] = struct{}{}
+		out = append(out, h)
+	}
+	return out
+}
+
+// SourceTransfer enumerates HDR transfer functions we recognise in
+// the source. Used by the policy decision: which features does the
+// source need the client to support?
+type SourceTransfer uint8
+
+const (
+	SourceTransferSDR SourceTransfer = iota
+	SourceTransferPQ                  // SMPTE ST 2084
+	SourceTransferHLG                 // Hybrid Log-Gamma
+)
+
+func sourceTransfer(track *TrackInfo) SourceTransfer {
+	if track == nil {
+		return SourceTransferSDR
+	}
+	t := strings.ToLower(track.VideoTransfer)
+	switch t {
+	case "pq", "smpte2084":
+		return SourceTransferPQ
+	case "hlg", "arib-std-b67":
+		return SourceTransferHLG
+	}
+	return SourceTransferSDR
+}
+
+// HDRPolicy is what the server decided to do for a given request.
+type HDRPolicy uint8
+
+const (
+	HDRPolicySDR          HDRPolicy = iota // source is SDR — no action
+	HDRPolicyPassthrough                    // client can handle source HDR
+	HDRPolicyTonemap                        // client can't — tone-map
+)
+
+// DecideHDRPolicy decides between passthrough and tone-mapping based
+// on the source's transfer function and what the client declared in
+// &hdr=. An empty clientHdr means "client sent no info" — the caller
+// should consult Config.HDRToSDR before applying the decision.
+func DecideHDRPolicy(source SourceTransfer, clientHdr []HDRFeature) HDRPolicy {
+	if source == SourceTransferSDR {
+		return HDRPolicySDR
+	}
+	if len(clientHdr) == 0 {
+		return HDRPolicyPassthrough
+	}
+	for _, h := range clientHdr {
+		if h == HDRNone {
+			return HDRPolicyTonemap
+		}
+	}
+	need := HDRPQ
+	if source == SourceTransferHLG {
+		need = HDRHLG
+	}
+	for _, h := range clientHdr {
+		if h == need || h == HDR10Bit {
+			return HDRPolicyPassthrough
+		}
+	}
+	return HDRPolicyTonemap
+}
+
 // audioFamily maps source audio (TrackInfo.CapsName / Codec) and
 // client declarations (string from &a=) to a single canonical token.
 // The token drives every downstream decision: passthrough eligibility,
@@ -160,7 +301,7 @@ func AudioPassThrough(track *TrackInfo, audioCaps []string) bool {
 //   v=h265:hw,h264:sw  a=aac,ac3
 //   v=h264:hw          a=
 //   "" / not present   → both empty
-func ParseCaps(q url.Values) (video []VideoCap, audio []string) {
+func ParseCaps(q url.Values) (video []VideoCap, audio []string, hdr []HDRFeature) {
 	for _, v := range strings.Split(q.Get("v"), ",") {
 		v = strings.TrimSpace(v)
 		if v == "" {
@@ -185,13 +326,29 @@ func ParseCaps(q url.Values) (video []VideoCap, audio []string) {
 		audio = append(audio, fam)
 	}
 
+	for _, h := range strings.Split(q.Get("hdr"), ",") {
+		if hf, ok := parseHDRFeature(h); ok {
+			hdr = append(hdr, hf)
+		}
+	}
+
 	// Dedup + sort: equivalent sets (any order, any dup count) produce
 	// the same task key.
 	video = dedupVideoCaps(video)
 	audio = dedupStrings(audio)
+	hdr = dedupHDR(hdr)
 	sortVideoCaps(video)
 	sort.Strings(audio)
-	return
+	return video, audio, hdr
+}
+
+// Legacy callers that only care about video/audio: a thin wrapper that
+// drops the HDR slice. Used everywhere ParseCaps was called before
+// HDR was added; we keep it so the diff in service.go / handlers.go
+// stays small.
+func ParseCapsLegacy(q url.Values) (video []VideoCap, audio []string) {
+	v, a, _ := ParseCaps(q)
+	return v, a
 }
 
 func dedupVideoCaps(v []VideoCap) []VideoCap {
@@ -238,17 +395,20 @@ func sortVideoCaps(v []VideoCap) {
 // CapsDigest builds the per-task key suffix. Empty caps produce "" so
 // legacy clients (no v/a) keep using hash-only task keys. Order-
 // independent (caller may pass anything; we sort copies).
-func CapsDigest(video []VideoCap, audio []string) string {
+func CapsDigest(video []VideoCap, audio []string, hdr []HDRFeature) string {
 	// Dedup defensively: callers may pass raw slices without going
 	// through ParseCaps (e.g. tests, or callers constructing caps
 	// in-place). Order-independent set semantics are part of the
 	// contract.
 	videoCopy := dedupVideoCaps(append([]VideoCap(nil), video...))
 	audioCopy := dedupStrings(append([]string(nil), audio...))
+	hdrCopy := append([]HDRFeature(nil), hdr...)
+	hdrCopy = dedupHDR(hdrCopy)
 	sortVideoCaps(videoCopy)
 	sort.Strings(audioCopy)
+	sort.Slice(hdrCopy, func(i, j int) bool { return hdrCopy[i] < hdrCopy[j] })
 
-	if len(videoCopy) == 0 && len(audioCopy) == 0 {
+	if len(videoCopy) == 0 && len(audioCopy) == 0 && len(hdrCopy) == 0 {
 		return ""
 	}
 	var b strings.Builder
@@ -262,6 +422,11 @@ func CapsDigest(video []VideoCap, audio []string) string {
 	for _, ac := range audioCopy {
 		b.WriteString("a:")
 		b.WriteString(ac)
+		b.WriteByte(',')
+	}
+	for _, h := range hdrCopy {
+		b.WriteString("h:")
+		b.WriteString(h.String())
 		b.WriteByte(',')
 	}
 	return b.String()

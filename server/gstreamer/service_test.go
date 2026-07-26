@@ -167,7 +167,7 @@ func TestServiceDisposeRejectsFurtherWork(t *testing.T) {
 	if got := service.Get(task.ID); got != nil {
 		t.Fatal("disposed service returned a task")
 	}
-	if _, err := service.GetOrAdd("hash", "1", 0, nil, nil); !errors.Is(err, ErrServiceClosed) {
+	if _, err := service.GetOrAdd("hash", "1", 0, nil, nil, nil); !errors.Is(err, ErrServiceClosed) {
 		t.Fatalf("GetOrAdd error=%v, want ErrServiceClosed", err)
 	}
 	if _, err := service.Probe("hash", "1"); !errors.Is(err, ErrServiceClosed) {

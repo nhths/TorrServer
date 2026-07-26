@@ -93,6 +93,20 @@ func (t *Task) markForRemoval() bool {
 }
 
 func NewTask(id string, fileID string, audio int, sourceURL string, probe ProbeInfo, cue *CueTimeline, conf Config) (*Task, error) {
+	conf = conf.normalized()
+	// HDR policy: when the caller passed HDR caps, decide
+	// passthrough vs tone-mapping using the source transfer. The
+	// admin's HDRToSDR config flag is the fallback for clients
+	// that didn't send any HDR info (len(conf.HDRCaps)==0).
+	if len(conf.HDRCaps) > 0 {
+		switch DecideHDRPolicy(sourceTransfer(probe.Video()), conf.HDRCaps) {
+		case HDRPolicyTonemap:
+			conf.HDRToSDR = true
+		case HDRPolicyPassthrough:
+			conf.HDRToSDR = false
+		}
+	}
+
 	task := &Task{
 		ID:              id,
 		FileID:          fileID,
@@ -100,7 +114,7 @@ func NewTask(id string, fileID string, audio int, sourceURL string, probe ProbeI
 		SourceURL:       sourceURL,
 		Probe:           probe,
 		Cue:             cue,
-		Config:          conf.normalized(),
+		Config:          conf,
 		LastSentSegment: -1,
 		lastActive:      time.Now().UTC(),
 	}

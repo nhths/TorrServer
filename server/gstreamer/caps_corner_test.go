@@ -26,7 +26,7 @@ func TestParseCaps_HugeInputDoesNotOOM(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseQuery: %v", err)
 	}
-	v, a := ParseCaps(q)
+	v, a := ParseCapsLegacy(q)
 	if len(v) > 0 || len(a) > 0 {
 		t.Fatalf("expected empty, got v=%d a=%d", len(v), len(a))
 	}
@@ -37,7 +37,7 @@ func TestParseCaps_DoesNotPanicOnControlChars(t *testing.T) {
 	// control chars are passed through to lower-level layers, which
 	// is acceptable; the caps string never lands in a shell.
 	q, _ := url.ParseQuery("v=\x00h264\x00:HW,aac\x01\x02")
-	v, a := ParseCaps(q)
+	v, a := ParseCapsLegacy(q)
 	if v == nil && a == nil {
 		t.Fatal("expected at least one parsed entry")
 	}
@@ -45,7 +45,7 @@ func TestParseCaps_DoesNotPanicOnControlChars(t *testing.T) {
 
 func TestParseCaps_WhitespaceAroundTierIsTolerated(t *testing.T) {
 	q, _ := url.ParseQuery("v= h264 : hw ")
-	v, _ := ParseCaps(q)
+	v, _ := ParseCapsLegacy(q)
 	if len(v) != 1 || v[0] != (VideoCap{Codec: "h264", Tier: TierHw}) {
 		t.Fatalf("got %+v", v)
 	}
@@ -53,14 +53,14 @@ func TestParseCaps_WhitespaceAroundTierIsTolerated(t *testing.T) {
 
 func TestParseCaps_OnlySeparators(t *testing.T) {
 	q, _ := url.ParseQuery("v=,,,,&a=,,,")
-	if v, a := ParseCaps(q); v != nil || a != nil {
+	if v, a := ParseCapsLegacy(q); v != nil || a != nil {
 		t.Fatalf("got v=%v a=%v", v, a)
 	}
 }
 
 func TestParseCaps_EmptyValueKey(t *testing.T) {
 	q, _ := url.ParseQuery("v=&a=")
-	if v, a := ParseCaps(q); v != nil || a != nil {
+	if v, a := ParseCapsLegacy(q); v != nil || a != nil {
 		t.Fatalf("got v=%v a=%v", v, a)
 	}
 }
@@ -77,7 +77,7 @@ func TestCapsDigest_NoInternalSeparator(t *testing.T) {
 		{[]VideoCap{{Codec: "h264", Tier: TierHw}, {Codec: "h265", Tier: TierSw}}, []string{"ac3", "eac3"}},
 	}
 	for _, tc := range cases {
-		if d := CapsDigest(tc.v, tc.a); strings.ContainsAny(d, "|\x00") {
+		if d := CapsDigest(tc.v, tc.a, nil); strings.ContainsAny(d, "|\x00") {
 			t.Fatalf("digest %q contains separator", d)
 		}
 	}
@@ -88,10 +88,10 @@ func TestTaskKey_HashWithSeparatorIsOpaque(t *testing.T) {
 	// separator ("hash|legacy") aliases no caps variant — it's just a
 	// weird bare hash. Future refactors that change this contract
 	// must update this test.
-	if k := taskKey("abc|def", nil, nil); k != "abc|def" {
+	if k := taskKey("abc|def", nil, nil, nil); k != "abc|def" {
 		t.Fatalf("bare hash with separator changed to %q", k)
 	}
-	if k := taskKey("abc|def", []VideoCap{{Codec: "h264", Tier: TierHw}}, nil); k == "abc|def" {
+	if k := taskKey("abc|def", []VideoCap{{Codec: "h264", Tier: TierHw}}, nil, nil); k == "abc|def" {
 		t.Fatalf("caps variant collides with separator-bearing hash: %q", k)
 	}
 }
@@ -260,11 +260,11 @@ func TestProperty_DigestStableUnderPermutation(t *testing.T) {
 	baseV := []VideoCap{{"h265", TierHw}, {"h264", TierSw}, {"av1", TierHw}}
 	baseA := []string{"aac", "ac3", "opus", "eac3"}
 
-	base := CapsDigest(baseV, baseA)
+	base := CapsDigest(baseV, baseA, nil)
 	for i := 0; i < 200; i++ {
 		v := permuteVideoCaps(baseV, i)
 		a := permuteStrings(baseA, i+7)
-		if got := CapsDigest(v, a); got != base {
+		if got := CapsDigest(v, a, nil); got != base {
 			t.Fatalf("perm %d: %q != base %q", i, got, base)
 		}
 	}
@@ -273,7 +273,7 @@ func TestProperty_DigestStableUnderPermutation(t *testing.T) {
 func TestProperty_DigestStableUnderDuplication(t *testing.T) {
 	v := []VideoCap{{"h264", TierHw}}
 	a := []string{"ac3"}
-	base := CapsDigest(v, a)
+	base := CapsDigest(v, a, nil)
 
 	for _, n := range []int{2, 3, 10, 100} {
 		dupV := make([]VideoCap, 0, n)
@@ -282,7 +282,7 @@ func TestProperty_DigestStableUnderDuplication(t *testing.T) {
 			dupV = append(dupV, v...)
 			dupA = append(dupA, a...)
 		}
-		if got := CapsDigest(dupV, dupA); got != base {
+		if got := CapsDigest(dupV, dupA, nil); got != base {
 			t.Fatalf("n=%d: %q != base %q", n, got, base)
 		}
 	}

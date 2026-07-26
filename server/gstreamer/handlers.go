@@ -89,7 +89,7 @@ func (s *Service) master(c *gin.Context) {
 	hash := c.Param("hash")
 	fileID := firstNonEmpty(c.Query("index"), c.Query("id"), c.Query("fileID"))
 	audio := parseQueryInt(c, "audio", 0)
-	videoCaps, audioCaps := ParseCaps(c.Request.URL.Query())
+	videoCaps, audioCaps, hdrCaps := ParseCaps(c.Request.URL.Query())
 
 	if !torrentReadyForGStreamer(hash) {
 		gstSourceFailure(hash, fileID, audio, "master task creation", ErrMetadataPending)
@@ -98,7 +98,7 @@ func (s *Service) master(c *gin.Context) {
 		return
 	}
 
-	task, err := s.GetOrAdd(hash, fileID, audio, videoCaps, audioCaps)
+	task, err := s.GetOrAdd(hash, fileID, audio, videoCaps, audioCaps, hdrCaps)
 	if err != nil {
 		gstSourceFailure(hash, fileID, audio, "master task creation", err)
 		abortWithSourceError(c, err)
@@ -627,11 +627,11 @@ func firstNonEmpty(values ...string) string {
 // parse caps from the same query the parent received.
 func (s *Service) lookup(c *gin.Context) *Task {
 	hash := c.Param("hash")
-	videoCaps, audioCaps := ParseCaps(c.Request.URL.Query())
-	if len(videoCaps) == 0 && len(audioCaps) == 0 {
+	videoCaps, audioCaps, hdrCaps := ParseCaps(c.Request.URL.Query())
+	if len(videoCaps) == 0 && len(audioCaps) == 0 && len(hdrCaps) == 0 {
 		return s.Get(hash)
 	}
-	return s.Get(taskKey(hash, videoCaps, audioCaps))
+	return s.Get(taskKey(hash, videoCaps, audioCaps, hdrCaps))
 }
 
 func startSegmentIndex(seconds int, segmentSeconds int, count int) int {
