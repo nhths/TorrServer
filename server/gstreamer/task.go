@@ -99,12 +99,26 @@ func NewTask(id string, fileID string, audio int, sourceURL string, probe ProbeI
 	// admin's HDRToSDR config flag is the fallback for clients
 	// that didn't send any HDR info (len(conf.HDRCaps)==0).
 	if len(conf.HDRCaps) > 0 {
-		switch DecideHDRPolicy(sourceTransfer(probe.Video()), conf.HDRCaps) {
+		sourceTr := sourceTransfer(probe.Video())
+		policy := DecideHDRPolicy(sourceTr, conf.HDRCaps)
+		switch policy {
 		case HDRPolicyTonemap:
 			conf.HDRToSDR = true
 		case HDRPolicyPassthrough:
 			conf.HDRToSDR = false
 		}
+		gstLogf("hdr.policy",
+			"hash=%s file=%s source=%s clientHdr=%v adminHDRToSDR=%v -> policy=%v finalHDRToSDR=%v",
+			id, fileID, sourceTr.String(),
+			hdrFeaturesToStrings(conf.HDRCaps),
+			conf.HDRToSDR != (policy == HDRPolicyPassthrough),
+			policy, conf.HDRToSDR,
+		)
+	} else {
+		gstLogf("hdr.policy",
+			"hash=%s file=%s source=%s clientHdr=<none> -> adminHDRToSDR=%v (no override)",
+			id, fileID, sourceTransfer(probe.Video()).String(), conf.HDRToSDR,
+		)
 	}
 
 	task := &Task{

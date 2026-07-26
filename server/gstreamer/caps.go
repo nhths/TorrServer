@@ -127,6 +127,15 @@ func dedupHDR(in []HDRFeature) []HDRFeature {
 	return out
 }
 
+// hdrFeaturesToStrings is a log helper.
+func hdrFeaturesToStrings(in []HDRFeature) []string {
+	out := make([]string, 0, len(in))
+	for _, h := range in {
+		out = append(out, h.String())
+	}
+	return out
+}
+
 // SourceTransfer enumerates HDR transfer functions we recognise in
 // the source. Used by the policy decision: which features does the
 // source need the client to support?
@@ -150,6 +159,16 @@ func sourceTransfer(track *TrackInfo) SourceTransfer {
 		return SourceTransferHLG
 	}
 	return SourceTransferSDR
+}
+
+func (s SourceTransfer) String() string {
+	switch s {
+	case SourceTransferPQ:
+		return "PQ"
+	case SourceTransferHLG:
+		return "HLG"
+	}
+	return "SDR"
 }
 
 // HDRPolicy is what the server decided to do for a given request.

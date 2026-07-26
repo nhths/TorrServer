@@ -17,6 +17,13 @@ import (
 )
 
 func (s *Service) SetupRoute(route gin.IRouter) {
+	// Request logging: every /gst/* request gets a structured log
+	// line to stderr (and optionally to a file) with the resolved
+	// hash, file index, audio track, parsed caps, and the response
+	// status. Without this, debugging caps-aware behaviour from the
+	// client side is guesswork.
+	route.Use(s.requestLogger())
+
 	route.GET("/gst/remove", s.remove)
 	route.GET("/gst/echo", s.echo)
 	route.GET("/gst/:hash/heartbeat", s.heartbeat)
@@ -26,6 +33,46 @@ func (s *Service) SetupRoute(route gin.IRouter) {
 	route.GET("/gst/:hash/init.mp4", s.initMP4)
 	route.GET("/gst/:hash/seg/*segment", s.segment)
 	route.GET("/gst/:hash/subs/*subtitle", s.subtitle)
+}
+
+// requestLogger emits a single structured line per request with the
+// key parameters a debugger wants: method, route, hash, fileID,
+// audio, v/a/hdr caps, status, duration, bytes written, and any
+// task id we matched.
+func (s *Service) requestLogger() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		start := time.Now()
+
+		// Parse caps eagerly so we can include the resolved feature
+		// sets in the log even when the inner handler errors out
+		// before parsing them itself.
+		videoCaps, audioCaps, hdrCaps := ParseCaps(c.Request.URL.Query())
+		vStr := make([]string, 0, len(videoCaps))
+		for _, vc := range videoCaps {
+			vStr = append(vStr, vc.Codec+":"+vc.Tier.String())
+		}
+		hdrStr := make([]string, 0, len(hdrCaps))
+		for _, h := range hdrCaps {
+			hdrStr = append(hdrStr, h.String())
+		}
+
+		c.Next()
+
+		dur := time.Since(start)
+		gstLogf("req",
+			"method=%s route=%s hash=%s fileID=%s audio=%s v=%s a=%v hdr=%s status=%d dur=%s",
+			c.Request.Method,
+			c.FullPath(),
+			c.Param("hash"),
+			c.Query("index"),
+			c.Query("audio"),
+			strings.Join(vStr, ","),
+			audioCaps,
+			strings.Join(hdrStr, ","),
+			c.Writer.Status(),
+			dur,
+		)
+	}
 }
 
 func (s *Service) remove(c *gin.Context) {

@@ -380,6 +380,14 @@ func validateProbe(probe ProbeInfo, conf Config) error {
 	if !supported {
 		return ErrUnsupportedVideo
 	}
+	gstLogf("probe.ok",
+		"container=%s transfer=%s width=%d height=%d HDR=%v hdrToSDR=%v",
+		probe.Container,
+		probe.Video().VideoTransfer,
+		probe.Video().Width, probe.Video().Height,
+		probe.Video().IsHDRVideo(),
+		conf.HDRToSDR,
+	)
 	return nil
 }
 

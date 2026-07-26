@@ -61,3 +61,11 @@ func gstTaskLogPrefix(task *Task) string {
 	}
 	return fmt.Sprintf("hash=%s file=%s audio=%d", task.ID, task.FileID, task.Audio)
 }
+
+// gstLogf always emits (independent of settings.IsDebug). Used for
+// per-request lines and HDR policy decisions — those are useful for
+// debugging caps-aware behaviour even when the server is not in debug
+// mode. Keep them brief — one line per request, no embedded JSON.
+func gstLogf(prefix string, format string, args ...any) {
+	log.TLogln("[GStreamer] " + prefix + ":", fmt.Sprintf(format, args...))
+}
