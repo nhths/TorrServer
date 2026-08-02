@@ -102,7 +102,7 @@ func (bt *BTServer) startRareCacheTickerLocked() {
 		bt.rareCacheCancel()
 		bt.rareCacheCancel = nil
 	}
-	if settings.BTsets == nil || settings.BTsets.DiskCacheBudgetBytes <= 0 {
+	if !archiveEnabled() {
 		return
 	}
 	interval := time.Duration(settings.BTsets.RareCacheTickSeconds) * time.Second
@@ -112,6 +112,16 @@ func (bt *BTServer) startRareCacheTickerLocked() {
 	ctx, cancel := context.WithCancel(context.Background())
 	bt.rareCacheCancel = cancel
 	go bt.runRareCacheLoop(ctx, interval)
+}
+
+// archiveEnabled returns true when both an archive path and
+// a non-zero budget are configured. The ticker is only
+// useful when there's somewhere to put pinned torrents.
+func archiveEnabled() bool {
+	if settings.BTsets == nil {
+		return false
+	}
+	return settings.BTsets.ArchivePath != "" && settings.BTsets.ArchiveBudgetBytes > 0
 }
 
 // Storage exposes the torrent storage layer so the settings
@@ -136,19 +146,30 @@ func (bt *BTServer) runRareCacheLoop(ctx context.Context, interval time.Duration
 	}
 }
 
-// runRareCachePass scans all known torrents and, for each
-// torrent with few connected seeders, pins the cache and
-// kicks off a full background download. After scanning, it
-// asks the storage to evict the oldest caches until on-disk
-// usage is within the configured quota.
-func (bt *BTServer) runRareCachePass() {
-	if settings.BTsets == nil || settings.BTsets.DiskCacheBudgetBytes <= 0 {
-		return
+// shouldPin is the pure decision rule for the rare-seed
+// policy: should the torrent be pinned and asked to download
+// in full? Extracted as a free function so it can be tested
+// without a live torrent client.
+func shouldPin(threshold, connectedSeeders int, alreadyPinned bool) bool {
+	if alreadyPinned {
+		return false
 	}
-	threshold := settings.BTsets.RareSeedersThreshold
 	if threshold < 0 {
 		threshold = 0
 	}
+	return connectedSeeders <= threshold
+}
+
+// runRareCachePass scans all known torrents and, for each
+// torrent with few connected seeders, pins the cache and
+// kicks off a full background download. After scanning, it
+// asks the storage to evict the oldest archived torrents
+// until archive usage is within the configured quota.
+func (bt *BTServer) runRareCachePass() {
+	if !archiveEnabled() {
+		return
+	}
+	threshold := settings.BTsets.RareSeedersThreshold
 
 	bt.mu.Lock()
 	snapshot := make([]*Torrent, 0, len(bt.torrents))
@@ -166,19 +187,13 @@ func (bt *BTServer) runRareCachePass() {
 			continue
 		}
 		stats := t.Torrent.Stats()
-		// ConnectedSeeders is the only public discovered-seed
-		// signal exposed by the torrent client. The watch dog
-		// for "really rare" is `connected <= threshold`.
-		if stats.ConnectedSeeders > threshold {
-			continue
-		}
-		if cache.IsPinned() {
+		if !shouldPin(threshold, stats.ConnectedSeeders, cache.IsPinned()) {
 			continue
 		}
 		// DownloadAll forces every piece to high priority so
 		// the BT client fetches the entire payload in the
-		// background. Pieces are still gated by the global
-		// reader priority in setLoadPriority.
+		// background. The piece's WriteAt routes a copy to
+		// the archive sub-system when the cache is pinned.
 		t.Torrent.DownloadAll()
 		cache.SetPinned(true)
 		serverlog.TLogln("[rare-seed] pin hash=", t.Hash().HexString(),
@@ -186,7 +201,7 @@ func (bt *BTServer) runRareCachePass() {
 	}
 
 	if bt.storage != nil {
-		bt.storage.JettisonIfOver()
+		bt.storage.JettisonArchiveIfOver()
 	}
 }
 
@@ -203,7 +218,9 @@ func (bt *BTServer) configure(ctx context.Context) {
     }
 
 	bt.storage = torrstor.NewStorage(settings.BTsets.CacheSize)
-	bt.storage.SetDiskBudget(settings.BTsets.DiskCacheBudgetBytes)
+	bt.storage.SetArchivePath(settings.BTsets.ArchivePath)
+	bt.storage.SetArchiveBudget(settings.BTsets.ArchiveBudgetBytes)
+	bt.storage.InitArchiveRoot()
 	bt.config.DefaultStorage = bt.storage
 
 	userAgent := "qBittorrent/4.3.9"

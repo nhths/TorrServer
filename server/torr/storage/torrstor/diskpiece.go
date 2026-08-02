@@ -12,6 +12,12 @@ import (
 	"server/settings"
 )
 
+// DiskPiece is the streaming on-disk piece. It is created
+// when the user has opted in to a streaming disk cache via
+// BTSets.UseDisk. It is independent of the rare-seed
+// archive: the streaming cache has no budget, no LRU, and
+// the only way it shrinks is when the user removes a
+// torrent or the cache is closed.
 type DiskPiece struct {
 	piece *Piece
 
@@ -22,18 +28,10 @@ type DiskPiece struct {
 
 func NewDiskPiece(p *Piece) *DiskPiece {
 	name := filepath.Join(settings.BTsets.TorrentsSavePath, p.cache.hash.HexString(), strconv.Itoa(p.Id))
-	ff, err := os.Stat(name)
-	if err == nil {
+	if ff, err := os.Stat(name); err == nil {
 		p.Size = ff.Size()
 		p.Complete = ff.Size() == p.cache.pieceLength
 		p.Accessed = ff.ModTime().Unix()
-		// The piece was on disk before this process started;
-		// account for it now so the storage counter is correct
-		// from the first tick of the eviction loop. Drift is
-		// reconciled by RefreshDiskUsedIfStale.
-		if p.cache.storage != nil {
-			p.cache.storage.AddDiskUsed(ff.Size())
-		}
 	}
 	return &DiskPiece{piece: p, name: name}
 }
@@ -49,11 +47,6 @@ func (p *DiskPiece) WriteAt(b []byte, off int64) (n int, err error) {
 	}
 	defer ff.Close()
 	n, err = ff.WriteAt(b, off)
-
-	// Bump the storage counter by the bytes actually written.
-	if n > 0 && p.piece.cache.storage != nil {
-		p.piece.cache.storage.AddDiskUsed(int64(n))
-	}
 
 	p.piece.Size += int64(n)
 	if p.piece.Size > p.piece.cache.pieceLength {
@@ -89,17 +82,6 @@ func (p *DiskPiece) ReadAt(b []byte, off int64) (n int, err error) {
 func (p *DiskPiece) Release() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-
-	// Stat the file before removing it so the storage counter
-	// is debited by the actual on-disk size. Fall back to the
-	// last-known Piece.Size if the stat fails.
-	debit := p.piece.Size
-	if info, err := os.Stat(p.name); err == nil {
-		debit = info.Size()
-	}
-	if p.piece.cache.storage != nil && debit > 0 {
-		p.piece.cache.storage.SubDiskUsed(debit)
-	}
 
 	p.piece.Size = 0
 	p.piece.Complete = false

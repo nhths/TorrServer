@@ -90,10 +90,28 @@ type BTSets struct {
 	// Viewed timecodes
 	TrackTimecode bool // store playback position (timecode) in viewed data
 
-	// Rare-seed cache policy
-	DiskCacheBudgetBytes  int64 // 0 = disabled
-	RareSeedersThreshold  int   // fully download + pin torrents with at most this many connected seeders
-	RareCacheTickSeconds  int   // policy/eviction ticker period
+	// Rare-seed archive policy
+	//
+	// ArchivePath is an on-disk directory separate from the
+	// streaming cache (TorrentsSavePath). It is the home of
+	// the long-term copy of rare torrents that the rare-seed
+	// policy pins for full background download.
+	//
+	// ArchiveBudgetBytes caps the size of that directory.
+	// The LRU evictor removes the oldest pinned torrent when
+	// the directory exceeds the budget. The policy is fully
+	// off when ArchivePath is empty or ArchiveBudgetBytes is
+	// zero.
+	ArchivePath        string
+	ArchiveBudgetBytes int64
+
+	// RareSeedersThreshold: pin + fully download a torrent
+	// whose connected-seeders count is <= this number.
+	RareSeedersThreshold int
+
+	// RareCacheTickSeconds: period of the policy/eviction
+	// ticker. Falls back to 60s when zero.
+	RareCacheTickSeconds int
 }
 
 func (v *BTSets) String() string {
@@ -182,7 +200,7 @@ func SetDefaultConfig() {
 		ImageURL:   "https://image.tmdb.org",
 		ImageURLRu: "https://imagetmdb.com",
 	}
-	sets.DiskCacheBudgetBytes = 0
+	sets.ArchiveBudgetBytes = 0
 	sets.RareSeedersThreshold = 2
 	sets.RareCacheTickSeconds = 60
 	BTsets = sets

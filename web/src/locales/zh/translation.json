@@ -191,6 +191,7 @@
       "Additional": "附加",
       "AdditionalDisabled": "（启用专业模式）",
       "App": "应用程序",
+      "Disk": "磁盘",
       "Main": "主要"
     },
     "TorrentDisconnectTimeout": "种子断开超时",
@@ -209,7 +210,18 @@
     "UseIINA": "提示在 IINA 中打开视频",
     "UseIINAHint": "将 IINA 播放器按钮添加到种子内容列表（仅 macOS）",
     "ViewedHistoryStorage": "查看历史存储：",
-    "ViewedStorageHint": "存储查看历史记录的位置"
+    "ViewedStorageHint": "存储查看历史记录的位置",
+    "DiskBudgetEnable": "启用稀有种子缓存（磁盘配额）",
+    "DiskBudgetGB": "磁盘配额（GB）",
+    "DiskBudgetHelper": "0 表示停用该策略。超过配额时，最旧的种子会被淘汰。",
+    "RareSeedersThreshold": "已连接做种者 ≤ 时自动归档",
+    "RareSeedersAtMostZero": "0（始终下载）",
+    "ArchivePath": "归档目录（长期缓存）",
+    "ArchivePathHelper": "留空 = 关闭归档策略。与流式缓存相互独立。",
+    "ArchiveBudgetEnable": "启用归档配额",
+    "ArchiveBudgetGB": "归档配额（GB）",
+    "ArchiveBudgetHelper": "超出配额时，最旧的固定种子会从归档中被淘汰。",
+    "RareCacheTickSeconds": "定时器周期（秒）"
   },
   "Size": "大小",
   "SpecialThanks": "特别感谢",

@@ -191,6 +191,7 @@
       "Additional": "Suplimentar",
       "AdditionalDisabled": "(activează modul PRO)",
       "App": "Aplicație",
+      "Disk": "Disc",
       "Main": "Meniu Principal"
     },
     "TorrentDisconnectTimeout": "Timp de expirare pentru deconectarea torrentului",
@@ -209,7 +210,18 @@
     "UseIINA": "Solicitare pentru deschiderea videoclipului în IINA",
     "UseIINAHint": "Adăugați butonul IINA player la lista de conținut torrent (doar macOS)",
     "ViewedHistoryStorage": "Istoricul vizualizărilor stocate:",
-    "ViewedStorageHint": "Alegeți unde să stocați istoricul vizualizat"
+    "ViewedStorageHint": "Alegeți unde să stocați istoricul vizualizat",
+    "DiskBudgetEnable": "Activează cache pentru torrente rare (cotă pe disc)",
+    "DiskBudgetGB": "Cotă pe disc (GB)",
+    "DiskBudgetHelper": "0 dezactivează politica. Cele mai vechi torrente sunt eliminate când utilizarea depășește cota.",
+    "RareSeedersThreshold": "Auto-arhivare când seederi conectați ≤",
+    "RareSeedersAtMostZero": "0 (descarcă întotdeauna)",
+    "ArchivePath": "Director arhivă (cache pe termen lung)",
+    "ArchivePathHelper": "Gol = politică de arhivă dezactivată. Independent de cache-ul de streaming.",
+    "ArchiveBudgetEnable": "Activează cota de arhivă",
+    "ArchiveBudgetGB": "Cotă de arhivă (GB)",
+    "ArchiveBudgetHelper": "Cele mai vechi torrente fixate sunt eliminate din arhivă când utilizarea depășește cota.",
+    "RareCacheTickSeconds": "Perioada ticker-ului (secunde)"
   },
   "Size": "Mărime",
   "SpecialThanks": "Mulțumiri speciale",

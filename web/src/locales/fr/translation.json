@@ -191,6 +191,7 @@
       "Additional": "Supplémentaire",
       "AdditionalDisabled": "(activer le mode PRO)",
       "App": "Application",
+      "Disk": "Disque",
       "Main": "Principal"
     },
     "TorrentDisconnectTimeout": "Délai de déconnexion du torrent",
@@ -209,7 +210,18 @@
     "UseIINA": "Demander d'ouvrir la vidéo dans IINA",
     "UseIINAHint": "Ajouter un bouton de lecteur IINA à la liste de contenu du torrent (macOS uniquement)",
     "ViewedHistoryStorage": "Stockage de l'historique des vues :",
-    "ViewedStorageHint": "Choisissez où stocker l'historique des vues"
+    "ViewedStorageHint": "Choisissez où stocker l'historique des vues",
+    "DiskBudgetEnable": "Activer le cache des torrents rares (quota disque)",
+    "DiskBudgetGB": "Quota disque (Go)",
+    "DiskBudgetHelper": "0 désactive la stratégie. Les torrents les plus anciens sont évincés lorsque l'utilisation dépasse le quota.",
+    "RareSeedersThreshold": "Auto-archivage si seeders connectés ≤",
+    "RareSeedersAtMostZero": "0 (toujours télécharger)",
+    "ArchivePath": "Répertoire d'archive (cache longue durée)",
+    "ArchivePathHelper": "Vide = stratégie d'archive désactivée. Indépendant du cache de streaming.",
+    "ArchiveBudgetEnable": "Activer le quota d'archive",
+    "ArchiveBudgetGB": "Quota d'archive (Go)",
+    "ArchiveBudgetHelper": "Les torrents épinglés les plus anciens sont évincés de l'archive lorsque l'utilisation dépasse le quota.",
+    "RareCacheTickSeconds": "Période du ticker (secondes)"
   },
   "Size": "Taille",
   "SpecialThanks": "Remerciements spéciaux",
