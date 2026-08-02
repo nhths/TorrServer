@@ -34,10 +34,36 @@ type Cache struct {
 	readers   map[*Reader]struct{}
 	muReaders sync.Mutex
 
+	// pinned marks the cache as one the rare-seed policy
+	// wants to keep on disk. While pinned, cleanPieces does
+	// not trim or reset piece priorities so the background
+	// download can fill the torrent to completion.
+	pinned   bool
 	isRemove bool
 	isClosed bool
 	muRemove sync.Mutex
 	torrent  *torrent.Torrent
+}
+
+// SetPinned marks or unmarks the cache. Pinning is purely an
+// eviction hint; pieces still age out of the LRU if the user
+// pins something genuinely huge, but the rare-seed loop is
+// allowed to keep a pinned cache indefinitely.
+func (c *Cache) SetPinned(p bool) {
+	c.muReaders.Lock()
+	c.pinned = p
+	c.muReaders.Unlock()
+}
+
+// IsPinned reports whether the rare-seed policy has flagged
+// this cache for full retention.
+func (c *Cache) IsPinned() bool {
+	if c == nil {
+		return false
+	}
+	c.muReaders.Lock()
+	defer c.muReaders.Unlock()
+	return c.pinned
 }
 
 func NewCache(capacity int64, storage *Storage) *Cache {
@@ -216,6 +242,7 @@ func (c *Cache) getRemPieces() []*Piece {
 	// Copy readers without a long lock
 	c.muReaders.Lock()
 	readers := make([]*Reader, 0, len(c.readers))
+	pinned := c.pinned
 	for r := range c.readers {
 		readers = append(readers, r)
 	}
@@ -251,6 +278,16 @@ func (c *Cache) getRemPieces() []*Piece {
 				piecesRemove = append(piecesRemove, p)
 			}
 		}
+	}
+
+	if pinned {
+		// Pinned torrents are being filled in the background.
+		// We must NOT clear piece priorities — doing so would
+		// demote every pending download to None and stall the
+		// rare-seed fetch.
+		c.setLoadPriority(ranges)
+		c.filled = fill
+		return nil
 	}
 
 	c.clearPriority()

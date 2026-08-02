@@ -89,6 +89,11 @@ type BTSets struct {
 
 	// Viewed timecodes
 	TrackTimecode bool // store playback position (timecode) in viewed data
+
+	// Rare-seed cache policy
+	DiskCacheBudgetBytes  int64 // 0 = disabled
+	RareSeedersThreshold  int   // fully download + pin torrents with at most this many connected seeders
+	RareCacheTickSeconds  int   // policy/eviction ticker period
 }
 
 func (v *BTSets) String() string {
@@ -177,6 +182,9 @@ func SetDefaultConfig() {
 		ImageURL:   "https://image.tmdb.org",
 		ImageURLRu: "https://imagetmdb.com",
 	}
+	sets.DiskCacheBudgetBytes = 0
+	sets.RareSeedersThreshold = 2
+	sets.RareCacheTickSeconds = 60
 	BTsets = sets
 	if !ReadOnly {
 		buf, err := json.Marshal(BTsets)

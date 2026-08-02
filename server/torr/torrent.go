@@ -229,6 +229,14 @@ func (t *Torrent) expired() bool {
 	if t.cache == nil {
 		return false
 	}
+	// Pinned torrents are being filled in the background by
+	// the rare-seed policy. Even when no reader is active and
+	// the idle timeout has elapsed, keep the torrent alive
+	// until the background download completes or the LRU
+	// evicts the on-disk payload.
+	if t.cache.IsPinned() {
+		return false
+	}
 	return t.cache.Readers() == 0 && t.expiredTime.Before(time.Now()) && (t.Stat == state.TorrentWorking || t.Stat == state.TorrentClosed)
 }
 

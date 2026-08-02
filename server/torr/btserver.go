@@ -3,18 +3,20 @@ package torr
 import (
 	"context"
 	"fmt"
-	"log"
+	stdlog "log"
 	"maps"
 	"net"
 	"net/http"
 	"net/url"
 	"sync"
+	"time"
 
 	"github.com/anacrolix/publicip"
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/wlynxg/anet"
 
+	serverlog "server/log"
 	"server/settings"
 	"server/torr/storage/torrstor"
 	"server/torr/utils"
@@ -28,6 +30,10 @@ type BTServer struct {
 	storage *torrstor.Storage
 
 	torrents map[metainfo.Hash]*Torrent
+
+	// rareCacheCancel stops the background rare-seed cache
+	// ticker (lifecycle is owned by Connect/Disconnect).
+	rareCacheCancel context.CancelFunc
 
 	mu sync.Mutex
 }
@@ -68,16 +74,119 @@ func (bt *BTServer) Connect() error {
 	bt.torrents = make(map[metainfo.Hash]*Torrent)
 	InitApiHelper(bt)
 
+	bt.startRareCacheTickerLocked()
+
 	return err
 }
 
 func (bt *BTServer) Disconnect() {
 	bt.mu.Lock()
 	defer bt.mu.Unlock()
+	if bt.rareCacheCancel != nil {
+		bt.rareCacheCancel()
+		bt.rareCacheCancel = nil
+	}
 	if bt.client != nil {
 		bt.client.Close()
 		bt.client = nil
 		utils.FreeOSMemGC()
+	}
+}
+
+// startRareCacheTickerLocked starts (or replaces) the
+// background goroutine that pins rare-seed torrents and
+// evicts the oldest torrents when the on-disk quota is
+// exceeded. Cancelled by Disconnect.
+func (bt *BTServer) startRareCacheTickerLocked() {
+	if bt.rareCacheCancel != nil {
+		bt.rareCacheCancel()
+		bt.rareCacheCancel = nil
+	}
+	if settings.BTsets == nil || settings.BTsets.DiskCacheBudgetBytes <= 0 {
+		return
+	}
+	interval := time.Duration(settings.BTsets.RareCacheTickSeconds) * time.Second
+	if interval <= 0 {
+		interval = 60 * time.Second
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	bt.rareCacheCancel = cancel
+	go bt.runRareCacheLoop(ctx, interval)
+}
+
+// Storage exposes the torrent storage layer so the settings
+// handler can propagate quota changes without reaching into
+// the BT internals.
+func (bt *BTServer) Storage() *torrstor.Storage {
+	bt.mu.Lock()
+	defer bt.mu.Unlock()
+	return bt.storage
+}
+
+func (bt *BTServer) runRareCacheLoop(ctx context.Context, interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			bt.runRareCachePass()
+		}
+	}
+}
+
+// runRareCachePass scans all known torrents and, for each
+// torrent with few connected seeders, pins the cache and
+// kicks off a full background download. After scanning, it
+// asks the storage to evict the oldest caches until on-disk
+// usage is within the configured quota.
+func (bt *BTServer) runRareCachePass() {
+	if settings.BTsets == nil || settings.BTsets.DiskCacheBudgetBytes <= 0 {
+		return
+	}
+	threshold := settings.BTsets.RareSeedersThreshold
+	if threshold < 0 {
+		threshold = 0
+	}
+
+	bt.mu.Lock()
+	snapshot := make([]*Torrent, 0, len(bt.torrents))
+	for _, t := range bt.torrents {
+		snapshot = append(snapshot, t)
+	}
+	bt.mu.Unlock()
+
+	for _, t := range snapshot {
+		if t.Torrent == nil || t.Torrent.Info() == nil {
+			continue
+		}
+		cache := t.GetCache()
+		if cache == nil {
+			continue
+		}
+		stats := t.Torrent.Stats()
+		// ConnectedSeeders is the only public discovered-seed
+		// signal exposed by the torrent client. The watch dog
+		// for "really rare" is `connected <= threshold`.
+		if stats.ConnectedSeeders > threshold {
+			continue
+		}
+		if cache.IsPinned() {
+			continue
+		}
+		// DownloadAll forces every piece to high priority so
+		// the BT client fetches the entire payload in the
+		// background. Pieces are still gated by the global
+		// reader priority in setLoadPriority.
+		t.Torrent.DownloadAll()
+		cache.SetPinned(true)
+		serverlog.TLogln("[rare-seed] pin hash=", t.Hash().HexString(),
+			" seeders=", stats.ConnectedSeeders, " threshold=", threshold)
+	}
+
+	if bt.storage != nil {
+		bt.storage.JettisonIfOver()
 	}
 }
 
@@ -94,6 +203,7 @@ func (bt *BTServer) configure(ctx context.Context) {
     }
 
 	bt.storage = torrstor.NewStorage(settings.BTsets.CacheSize)
+	bt.storage.SetDiskBudget(settings.BTsets.DiskCacheBudgetBytes)
 	bt.config.DefaultStorage = bt.storage
 
 	userAgent := "qBittorrent/4.3.9"
@@ -136,24 +246,24 @@ func (bt *BTServer) configure(ctx context.Context) {
 		bt.config.UploadRateLimiter = utils.Limit(settings.BTsets.UploadRateLimit * 1024)
 	}
 	if settings.TorAddr != "" {
-		log.Println("Set listen addr", settings.TorAddr)
+		stdlog.Println("Set listen addr", settings.TorAddr)
 		bt.config.SetListenAddr(settings.TorAddr)
 	} else {
 		if settings.BTsets.PeersListenPort > 0 {
-			log.Println("Set listen port", settings.BTsets.PeersListenPort)
+			stdlog.Println("Set listen port", settings.BTsets.PeersListenPort)
 			bt.config.ListenPort = settings.BTsets.PeersListenPort
 		} else {
-			log.Println("Set listen port to random autoselect (0)")
+			stdlog.Println("Set listen port to random autoselect (0)")
 			bt.config.ListenPort = 0
 		}
 	}
 
 	// Configure proxy if enabled
 	if err := bt.configureProxy(); err != nil {
-		log.Println("Proxy configuration error:", err)
+		stdlog.Println("Proxy configuration error:", err)
 	}
 
-	log.Println("Client config:", settings.BTsets)
+	stdlog.Println("Client config:", settings.BTsets)
 
 	var err error
 
@@ -166,14 +276,14 @@ func (bt *BTServer) configure(ctx context.Context) {
 	if bt.config.PublicIp4 == nil {
 		bt.config.PublicIp4, err = publicip.Get4(ctx)
 		if err != nil {
-			log.Printf("error getting public ipv4 address: %v", err)
+			stdlog.Printf("error getting public ipv4 address: %v", err)
 		}
 	}
 	if bt.config.PublicIp4.To4() == nil { // possible IPv6 from publicip.Get4(ctx)
 		bt.config.PublicIp4 = nil
 	}
 	if bt.config.PublicIp4 != nil {
-		log.Println("PublicIp4:", bt.config.PublicIp4)
+		stdlog.Println("PublicIp4:", bt.config.PublicIp4)
 	}
 
 	// set public IPv6
@@ -185,14 +295,14 @@ func (bt *BTServer) configure(ctx context.Context) {
 	if bt.config.PublicIp6 == nil && settings.BTsets.EnableIPv6 {
 		bt.config.PublicIp6, err = publicip.Get6(ctx)
 		if err != nil {
-			log.Printf("error getting public ipv6 address: %v", err)
+			stdlog.Printf("error getting public ipv6 address: %v", err)
 		}
 	}
 	if bt.config.PublicIp6.To16() == nil { // just 4 sure it's valid IPv6
 		bt.config.PublicIp6 = nil
 	}
 	if bt.config.PublicIp6 != nil {
-		log.Println("PublicIp6:", bt.config.PublicIp6)
+		stdlog.Println("PublicIp6:", bt.config.PublicIp6)
 	}
 }
 
@@ -224,7 +334,7 @@ func (bt *BTServer) configureProxy() error {
 	}
 
 	if proxyMode == "full" {
-		log.Printf("Configuring proxy for all BitTorrent traffic: %s://%s", scheme, parsedURL.Host)
+		stdlog.Printf("Configuring proxy for all BitTorrent traffic: %s://%s", scheme, parsedURL.Host)
 
 		// Set ProxyURL - this will be used by anacrolix/torrent for all BitTorrent traffic
 		bt.config.ProxyURL = proxyURL
@@ -234,24 +344,24 @@ func (bt *BTServer) configureProxy() error {
 			return parsedURL, nil
 		}
 
-		log.Println("Proxy configured successfully for all BitTorrent connections (tracker, DHT, peers)")
+		stdlog.Println("Proxy configured successfully for all BitTorrent connections (tracker, DHT, peers)")
 	} else if proxyMode == "peers" {
-		log.Printf("Configuring proxy for peer connections only: %s://%s", scheme, parsedURL.Host)
+		stdlog.Printf("Configuring proxy for peer connections only: %s://%s", scheme, parsedURL.Host)
 
 		// Set ProxyURL for peer connections, but don't set HTTPProxy
 		// This routes DHT and peer connections through proxy, but not HTTP tracker requests
 		bt.config.ProxyURL = proxyURL
 
-		log.Println("Proxy configured successfully for peer and DHT connections only")
+		stdlog.Println("Proxy configured successfully for peer and DHT connections only")
 	} else {
-		log.Printf("Configuring proxy for HTTP tracker requests only: %s://%s", scheme, parsedURL.Host)
+		stdlog.Printf("Configuring proxy for HTTP tracker requests only: %s://%s", scheme, parsedURL.Host)
 
 		// Only set HTTPProxy for tracker requests, don't set ProxyURL
 		bt.config.HTTPProxy = func(req *http.Request) (*url.URL, error) {
 			return parsedURL, nil
 		}
 
-		log.Println("Proxy configured successfully for HTTP tracker connections only")
+		stdlog.Println("Proxy configured successfully for HTTP tracker connections only")
 	}
 
 	return nil
@@ -293,7 +403,7 @@ func isPrivateIP(ip net.IP) bool {
 func getPublicIp4() net.IP {
 	ifaces, err := anet.Interfaces()
 	if err != nil {
-		log.Println("Error get public IPv4")
+		stdlog.Println("Error get public IPv4")
 		return nil
 	}
 	for _, i := range ifaces {
@@ -319,7 +429,7 @@ func getPublicIp4() net.IP {
 func getPublicIp6() net.IP {
 	ifaces, err := anet.Interfaces()
 	if err != nil {
-		log.Println("Error get public IPv6")
+		stdlog.Println("Error get public IPv6")
 		return nil
 	}
 	for _, i := range ifaces {

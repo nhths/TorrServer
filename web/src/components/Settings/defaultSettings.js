@@ -31,4 +31,7 @@ export default {
   SslKey: '',
   ShowFSActiveTorr: true,
   StoreSettingsInJson: true,
+  DiskCacheBudgetBytes: 0,
+  RareSeedersThreshold: 2,
+  RareCacheTickSeconds: 60,
 }

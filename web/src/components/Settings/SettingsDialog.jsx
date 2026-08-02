@@ -21,6 +21,7 @@ import MobileAppSettings from './MobileAppSettings'
 import TorznabSettings from './TorznabSettings'
 import TMDBSettings from './TMDBSettings'
 import GStreamerSettings from './GStreamerSettings'
+import DiskSettings from './DiskSettings'
 
 export default function SettingsDialog({ handleClose }) {
   const { t } = useTranslation()
@@ -44,7 +45,8 @@ export default function SettingsDialog({ handleClose }) {
   const tabSearch = 2
   const tabApp = 3
   const tabGStreamer = 4
-  const maxTab = gstAvailable ? tabGStreamer : tabApp
+  const tabDisk = 5
+  const maxTab = tabDisk
 
   useEffect(() => {
     fetch(gstSettingsHost())
@@ -180,6 +182,12 @@ export default function SettingsDialog({ handleClose }) {
               {...a11yProps(tabGStreamer)}
             />
           )}
+
+          <StyledTab
+            disabled={!isProMode}
+            label={t('SettingsDialog.Tabs.Disk', 'Disk')}
+            {...a11yProps(tabDisk)}
+          />
         </StyledTabs>
       </AppBar>
 
@@ -233,6 +241,10 @@ export default function SettingsDialog({ handleClose }) {
                   <GStreamerSettings />
                 </TabPanel>
               )}
+
+              <TabPanel value={selectedTab} index={tabDisk} dir={direction}>
+                <DiskSettings settings={settings} inputForm={inputForm} updateSettings={updateSettings} />
+              </TabPanel>
             </SwipeableViews>
           </>
         ) : (
